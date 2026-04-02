@@ -1,5 +1,4 @@
 import json
-import shutil
 import uuid
 from pathlib import Path
 
@@ -8,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, HttpUrl
 from sqlalchemy.orm import Session
 
+from config import MAX_FILE_BYTES
 from database import get_db, init_db
 from models.rfp import RFP
 from services.extractor import extract_requirements
@@ -53,10 +53,22 @@ async def analyze_rfp(file: UploadFile = File(...), db: Session = Depends(get_db
     file_id = str(uuid.uuid4())
     file_path = UPLOAD_DIR / f"{file_id}.pdf"
 
-    with open(file_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
-
     try:
+        # Stream to disk in chunks; reject early if size limit is exceeded.
+        received = 0
+        with open(file_path, "wb") as f:
+            while True:
+                chunk = await file.read(65536)  # 64 KB chunks
+                if not chunk:
+                    break
+                received += len(chunk)
+                if received > MAX_FILE_BYTES:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"File too large. Maximum allowed size is {MAX_FILE_BYTES // (1024 * 1024)} MB.",
+                    )
+                f.write(chunk)
+
         text = parse_pdf(str(file_path))
         if not text.strip():
             raise HTTPException(status_code=400, detail="Could not extract text from PDF. Ensure the PDF contains selectable text.")

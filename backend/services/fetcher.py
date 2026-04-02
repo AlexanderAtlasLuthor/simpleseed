@@ -3,7 +3,6 @@ Fetch RFP content from a URL.
 Handles HTML pages and direct PDF links.
 No scraping of authenticated portals — user provides the direct URL.
 """
-import io
 import tempfile
 from pathlib import Path
 from urllib.parse import urlparse
@@ -11,6 +10,7 @@ from urllib.parse import urlparse
 import httpx
 from bs4 import BeautifulSoup
 
+from config import MAX_FILE_BYTES
 from services.parser import parse_pdf
 
 _HEADERS = {
@@ -19,7 +19,6 @@ _HEADERS = {
 }
 
 _TIMEOUT = 30  # seconds
-_MAX_BYTES = 20 * 1024 * 1024  # 20 MB
 
 
 async def fetch_url_text(url: str) -> tuple[str, str]:
@@ -34,8 +33,35 @@ async def fetch_url_text(url: str) -> tuple[str, str]:
 
     try:
         async with httpx.AsyncClient(headers=_HEADERS, timeout=_TIMEOUT, follow_redirects=True) as client:
-            response = await client.get(url)
-            response.raise_for_status()
+            async with client.stream("GET", url) as response:
+                response.raise_for_status()
+
+                content_type = response.headers.get("content-type", "").lower()
+                source_name = parsed.hostname or url
+
+                # Fast rejection: Content-Length header present and already too large.
+                raw_cl = response.headers.get("content-length")
+                if raw_cl and int(raw_cl) > MAX_FILE_BYTES:
+                    raise ValueError(
+                        f"Remote file too large ({int(raw_cl) // (1024 * 1024)} MB). "
+                        f"Maximum allowed size is {MAX_FILE_BYTES // (1024 * 1024)} MB."
+                    )
+
+                # Stream body in chunks with running size check.
+                chunks: list[bytes] = []
+                received = 0
+                async for chunk in response.aiter_bytes(65536):
+                    received += len(chunk)
+                    if received > MAX_FILE_BYTES:
+                        raise ValueError(
+                            f"Remote file exceeds the {MAX_FILE_BYTES // (1024 * 1024)} MB limit."
+                        )
+                    chunks.append(chunk)
+
+                body = b"".join(chunks)
+
+    except ValueError:
+        raise
     except httpx.TimeoutException:
         raise ValueError("Request timed out. The server took too long to respond.")
     except httpx.HTTPStatusError as e:
@@ -43,19 +69,16 @@ async def fetch_url_text(url: str) -> tuple[str, str]:
     except httpx.RequestError as e:
         raise ValueError(f"Could not reach URL: {e}")
 
-    content_type = response.headers.get("content-type", "").lower()
-    source_name = parsed.hostname or url
-
     # PDF response
     if "pdf" in content_type or url.lower().endswith(".pdf"):
-        text = _extract_pdf_bytes(response.content)
+        text = _extract_pdf_bytes(body)
         if not text.strip():
             raise ValueError("PDF downloaded but contains no extractable text (may be scanned/image-based).")
         return text, source_name
 
     # HTML response
     if "html" in content_type or "text" in content_type:
-        text = _extract_html_text(response.text)
+        text = _extract_html_text(body.decode("utf-8", errors="replace"))
         if not text.strip():
             raise ValueError("Page fetched but no readable text could be extracted.")
         return text, source_name
