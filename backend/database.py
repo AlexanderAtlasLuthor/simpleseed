@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker, DeclarativeBase
 
 SQLALCHEMY_DATABASE_URL = "sqlite:///./simpleseed.db"
@@ -16,6 +16,16 @@ class Base(DeclarativeBase):
 def init_db():
     from models.rfp import RFP  # noqa: F401
     Base.metadata.create_all(bind=engine)
+    _migrate()
+
+
+def _migrate():
+    """Add columns introduced after the initial schema without dropping data."""
+    with engine.connect() as conn:
+        existing = {row[1] for row in conn.execute(text("PRAGMA table_info(rfps)"))}
+        if "industry" not in existing:
+            conn.execute(text("ALTER TABLE rfps ADD COLUMN industry TEXT DEFAULT 'general'"))
+            conn.commit()
 
 
 def get_db():

@@ -15,4 +15,5 @@ class RFP(Base):
     decision = Column(String, default="NO BID")
     score_breakdown = Column(Text, default="{}")
     reasoning = Column(Text, default="")
+    industry = Column(String, nullable=True, default="general")
     created_at = Column(DateTime, server_default=func.now())

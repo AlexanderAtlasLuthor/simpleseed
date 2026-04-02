@@ -16,9 +16,20 @@ interface SAMOpportunity {
   uiLink: string;
 }
 
+const INDUSTRIES = [
+  { id: "",                      label: "General (neutral)"          },
+  { id: "technology",            label: "Technology"                 },
+  { id: "consulting",            label: "Consulting"                 },
+  { id: "healthcare",            label: "Healthcare"                 },
+  { id: "construction",          label: "Construction"               },
+  { id: "government_contracting", label: "Government Contracting"   },
+  { id: "education",             label: "Education"                  },
+];
+
 export default function Home() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [industry, setIndustry] = useState<string>("");
 
   // SAM.gov state
   const [samResults, setSamResults] = useState<SAMOpportunity[] | null>(null);
@@ -37,6 +48,7 @@ export default function Home() {
 
     const formData = new FormData();
     formData.append("file", file);
+    if (industry) formData.append("industry", industry);
 
     try {
       const res = await fetch("/api/analyze", { method: "POST", body: formData });
@@ -58,7 +70,7 @@ export default function Home() {
       const res = await fetch("/api/analyze-url", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url }),
+        body: JSON.stringify({ url, industry: industry || null }),
       });
       if (!res.ok) throw new Error((await res.json()).detail || "Analysis failed");
       handleResult(await res.json());
@@ -97,7 +109,11 @@ export default function Home() {
     setError(null);
 
     try {
-      const res = await fetch(`/api/sam/analyze/${noticeId}`, { method: "POST" });
+      const res = await fetch(`/api/sam/analyze/${noticeId}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ industry: industry || null }),
+      });
       if (!res.ok) throw new Error((await res.json()).detail || "Analysis failed");
       handleResult(await res.json());
     } catch (e) {
@@ -122,6 +138,25 @@ export default function Home() {
         <p className="text-lg text-[#6b8f72] max-w-xl mx-auto leading-relaxed">
           Upload a PDF, paste a link, or search SAM.gov — get instant AI analysis,
           bid scoring, and a ready-to-customize proposal.
+        </p>
+      </div>
+
+      {/* Industry selector */}
+      <div className="max-w-xl mx-auto mb-4">
+        <label className="block text-xs text-[#6b8f72] mb-2">Your industry</label>
+        <select
+          value={industry}
+          onChange={(e) => setIndustry(e.target.value)}
+          className="w-full bg-[#0a0f0d] border border-[#1e2d22] rounded-xl px-4 py-2.5 text-sm text-[#e8f5eb] focus:outline-none focus:border-seed-700 transition-colors appearance-none cursor-pointer"
+        >
+          {INDUSTRIES.map((ind) => (
+            <option key={ind.id} value={ind.id} className="bg-[#0a0f0d]">
+              {ind.label}
+            </option>
+          ))}
+        </select>
+        <p className="mt-1.5 text-xs text-[#3d5c44]">
+          Proposals and scoring adapt to the selected industry context.
         </p>
       </div>
 

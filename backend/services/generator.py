@@ -1,4 +1,5 @@
 import os
+from typing import Optional
 import anthropic
 from dotenv import load_dotenv
 
@@ -19,7 +20,10 @@ def _req_text(r) -> str:
     return r["text"] if isinstance(r, dict) else str(r)
 
 
-def generate_proposal(requirements: dict | str) -> str:
+def generate_proposal(requirements: dict | str, industry: Optional[str] = None) -> str:
+    from services.industry import get_industry_context
+    ctx = get_industry_context(industry)
+
     if isinstance(requirements, dict):
         req_text = f"""Summary: {requirements.get('summary', 'N/A')}
 Client: {requirements.get('client', 'N/A')}
@@ -37,7 +41,17 @@ Evaluation Criteria:
     else:
         req_text = str(requirements)
 
+    domain_line = (
+        f"- Highlight relevant expertise in: {', '.join(ctx['relevant_domains'][:4])}\n"
+        if ctx["relevant_domains"] else ""
+    )
+
     prompt = f"""Write a professional proposal draft for this RFP.
+
+VENDOR CONTEXT:
+You are writing on behalf of a {ctx['vendor_type']}.
+Industry focus: {ctx['focus']}
+Tone: {ctx['tone']}
 
 REQUIREMENTS:
 {req_text}
@@ -52,10 +66,11 @@ Write the proposal with these sections:
 
 Guidelines:
 - Be professional, concise, and compelling
+- Adapt the language and emphasis to the {ctx['label']} industry context
 - Use [COMPANY NAME], [SPECIFIC METRIC], [X YEARS] as placeholders for details that need customization
 - Focus on value delivered, not just capabilities
 - Keep each section tight and purposeful
-
+{domain_line}
 Write the full proposal now:"""
 
     message = get_client().messages.create(
