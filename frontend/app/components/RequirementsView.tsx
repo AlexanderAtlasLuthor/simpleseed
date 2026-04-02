@@ -2,6 +2,8 @@ interface RequirementItem {
   text: string;
   category: "mandatory" | "optional" | "unclear";
   reason?: string;
+  type?: "technical" | "administrative" | "unclear";
+  type_reason?: string;
 }
 
 interface Requirements {
@@ -49,15 +51,23 @@ const CATEGORY_STYLES: Record<string, string> = {
   unclear:   "bg-[#1e2d22] border-[#1e2d22] text-[#6b8f72]",
 };
 
+const TYPE_STYLES: Record<string, string> = {
+  technical:      "bg-purple-950/40 border-purple-900/50 text-purple-400",
+  administrative: "bg-yellow-950/40 border-yellow-900/50 text-yellow-500",
+  unclear:        "bg-[#1e2d22] border-[#1e2d22] text-[#6b8f72]",
+};
+
 function RequirementsList({ items }: { items?: (string | RequirementItem)[] }) {
   if (!items?.length) return <p className="text-sm text-[#6b8f72]">None identified</p>;
   return (
     <ul className="space-y-2">
       {items.map((item, i) => {
         const isObj = typeof item === "object" && item !== null;
-        const text = isObj ? item.text : item;
-        const category = isObj ? item.category : null;
-        const reason = isObj ? item.reason : null;
+        const text       = isObj ? item.text        : item;
+        const category   = isObj ? item.category    : null;
+        const reason     = isObj ? item.reason      : null;
+        const type       = isObj ? item.type        : null;
+        const typeReason = isObj ? item.type_reason : null;
         return (
           <li key={i} className="flex gap-2 text-sm">
             <span className="text-seed-500 mt-0.5 shrink-0">▸</span>
@@ -69,6 +79,14 @@ function RequirementsList({ items }: { items?: (string | RequirementItem)[] }) {
                   title={reason ?? undefined}
                 >
                   {category}
+                </span>
+              )}
+              {type && (
+                <span
+                  className={`ml-1 text-[10px] px-1.5 py-0.5 rounded border align-middle ${TYPE_STYLES[type] ?? TYPE_STYLES.unclear}`}
+                  title={typeReason ?? undefined}
+                >
+                  {type}
                 </span>
               )}
             </div>
