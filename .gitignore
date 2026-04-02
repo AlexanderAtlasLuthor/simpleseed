@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.env
+venv/
+.venv/
+*.db
+*.db-journal
+
+# Backend
+backend/files/
+backend/knowledge/
+!backend/files/.gitkeep
+!backend/knowledge/.gitkeep
+
+# Node
+node_modules/
+.next/
+out/
+frontend/.env.local
+
+# System
+.DS_Store
+*.log
