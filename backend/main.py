@@ -20,6 +20,7 @@ from services.profile import evaluate_strategic_fit, load_profile, save_profile
 from services.risks import identify_risks
 from services.sam_gov import get_opportunity_text, search_opportunities
 from services.scoring import score_bid
+from services.scoring_config import load_scoring_config, save_scoring_config, validate_scoring_config
 
 app = FastAPI(title="SimpleSeed API", version="1.0.0")
 
@@ -42,6 +43,19 @@ class AnalyzeURLRequest(BaseModel):
 
 class SAMAnalyzeRequest(BaseModel):
     industry: Optional[str] = None
+
+
+class ScoringConfigWeights(BaseModel):
+    relevance_score:    float
+    budget_fit:         float
+    requirements_match: float
+    completeness:       float
+
+
+class ScoringConfigRequest(BaseModel):
+    weights:              ScoringConfigWeights
+    bid_threshold:        float
+    strategic_fit_weight: float
 
 
 class CompanyProfileRequest(BaseModel):
@@ -101,6 +115,26 @@ async def update_profile(body: CompanyProfileRequest):
     """Save the company profile. Set company_name to enable strategic fit evaluation."""
     saved = save_profile(body.model_dump())
     return {"configured": bool(saved.get("company_name")), "profile": saved}
+
+
+@app.get("/api/scoring-config")
+async def get_scoring_config():
+    """Return the active scoring configuration (weights, threshold, strategic_fit_weight)."""
+    return load_scoring_config()
+
+
+@app.put("/api/scoring-config")
+async def update_scoring_config(body: ScoringConfigRequest):
+    """
+    Save a new scoring configuration.
+    Returns 422 if weights don't sum to 1.0, values are out of range, or fields are missing.
+    """
+    data = body.model_dump()
+    try:
+        saved = save_scoring_config(data)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return saved
 
 
 @app.post("/api/analyze")
@@ -266,20 +300,25 @@ async def _run_analysis(
         raw_score = score_bid(requirements, industry=resolved_industry)
 
         # Strategic fit: compare RFP against company profile.
-        # When a configured profile is present the final score is adjusted:
-        #   final = raw_score * 0.80 + strategic_fit_score * 0.20
-        # When no profile is configured the score is unchanged (backward compatible).
+        # When a configured profile is present, the final score is blended:
+        #   final = raw_score * (1 - sf_weight) + strategic_fit_score * sf_weight
+        # When no profile is configured, the score is unchanged (backward compatible).
+        # All three values (sf_weight, bid_threshold) come from scoring_config.json.
+        scoring_cfg = load_scoring_config()
+        sf_weight = float(scoring_cfg["strategic_fit_weight"])
+        bid_threshold = float(scoring_cfg["bid_threshold"])
+
         profile = load_profile()
         strategic_fit = evaluate_strategic_fit(requirements, profile)
 
         if strategic_fit.get("status") == "evaluated":
             fit_score = strategic_fit["score"]
-            adjusted = round(raw_score["score"] * 0.80 + fit_score * 0.20)
+            adjusted = round(raw_score["score"] * (1 - sf_weight) + fit_score * sf_weight)
             score_result = {
                 **raw_score,
                 "score": adjusted,
-                "decision": "BID" if adjusted >= 60 else "NO BID",
-                "strategic_fit_weight": 0.20,
+                "decision": "BID" if adjusted >= bid_threshold else "NO BID",
+                "strategic_fit_weight": sf_weight,
             }
         else:
             score_result = raw_score

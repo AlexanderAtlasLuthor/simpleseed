@@ -1,0 +1,10 @@
+{
+  "weights": {
+    "relevance_score": 0.30,
+    "budget_fit": 0.25,
+    "requirements_match": 0.25,
+    "completeness": 0.20
+  },
+  "bid_threshold": 60,
+  "strategic_fit_weight": 0.20
+}
