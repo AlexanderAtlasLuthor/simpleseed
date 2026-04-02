@@ -25,7 +25,9 @@ def _migrate():
         existing = {row[1] for row in conn.execute(text("PRAGMA table_info(rfps)"))}
         if "industry" not in existing:
             conn.execute(text("ALTER TABLE rfps ADD COLUMN industry TEXT DEFAULT 'general'"))
-            conn.commit()
+        if "risks" not in existing:
+            conn.execute(text("ALTER TABLE rfps ADD COLUMN risks TEXT DEFAULT '[]'"))
+        conn.commit()
 
 
 def get_db():

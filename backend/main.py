@@ -16,6 +16,7 @@ from services.fetcher import fetch_url_text
 from services.generator import generate_proposal
 from services.industry import SUPPORTED_INDUSTRIES, resolve_industry
 from services.parser import parse_pdf
+from services.risks import identify_risks
 from services.sam_gov import get_opportunity_text, search_opportunities
 from services.scoring import score_bid
 
@@ -133,6 +134,7 @@ async def get_rfp(rfp_id: str, db: Session = Depends(get_db)):
         "filename": rfp.filename,
         "industry": rfp.industry or "general",
         "requirements": _safe_json_load(rfp.requirements, {}),
+        "risks": _safe_json_load(rfp.risks, []),
         "proposal": rfp.proposal,
         "score": {
             "score": rfp.score,
@@ -221,6 +223,7 @@ async def _run_analysis(
 
     try:
         requirements = extract_requirements(text)
+        risks = identify_risks(requirements, industry=resolved_industry)
         proposal = generate_proposal(requirements, industry=resolved_industry)
         score_result = score_bid(requirements, industry=resolved_industry)
 
@@ -230,6 +233,7 @@ async def _run_analysis(
             filename=filename,
             original_text=text[:12000],
             requirements=json.dumps(requirements),
+            risks=json.dumps(risks),
             proposal=proposal,
             score=score_result["score"],
             decision=score_result["decision"],
@@ -246,6 +250,7 @@ async def _run_analysis(
             "filename": rfp.filename,
             "industry": resolved_industry,
             "requirements": requirements,
+            "risks": risks,
             "proposal": proposal,
             "score": score_result,
             "created_at": rfp.created_at.isoformat(),

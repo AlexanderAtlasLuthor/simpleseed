@@ -16,4 +16,5 @@ class RFP(Base):
     score_breakdown = Column(Text, default="{}")
     reasoning = Column(Text, default="")
     industry = Column(String, nullable=True, default="general")
+    risks = Column(Text, nullable=True, default="[]")
     created_at = Column(DateTime, server_default=func.now())
