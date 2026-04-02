@@ -1,0 +1,17 @@
+{
+  "_note": "Fill in your real company data and set company_name to enable strategic fit evaluation. Leave company_name null to disable.",
+  "company_name": null,
+  "industries": [],
+  "capabilities": [],
+  "services": [],
+  "target_contract_size": {
+    "min": null,
+    "max": null
+  },
+  "geographies": [],
+  "certifications": [],
+  "past_performance_keywords": [],
+  "preferred_project_types": [],
+  "excluded_project_types": [],
+  "capacity_constraints": []
+}

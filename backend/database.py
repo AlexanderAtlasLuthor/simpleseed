@@ -27,6 +27,8 @@ def _migrate():
             conn.execute(text("ALTER TABLE rfps ADD COLUMN industry TEXT DEFAULT 'general'"))
         if "risks" not in existing:
             conn.execute(text("ALTER TABLE rfps ADD COLUMN risks TEXT DEFAULT '[]'"))
+        if "strategic_fit" not in existing:
+            conn.execute(text("ALTER TABLE rfps ADD COLUMN strategic_fit TEXT DEFAULT '{}'"))
         conn.commit()
 
 

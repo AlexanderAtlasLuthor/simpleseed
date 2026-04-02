@@ -16,6 +16,7 @@ from services.fetcher import fetch_url_text
 from services.generator import generate_proposal
 from services.industry import SUPPORTED_INDUSTRIES, resolve_industry
 from services.parser import parse_pdf
+from services.profile import evaluate_strategic_fit, load_profile, save_profile
 from services.risks import identify_risks
 from services.sam_gov import get_opportunity_text, search_opportunities
 from services.scoring import score_bid
@@ -43,6 +44,20 @@ class SAMAnalyzeRequest(BaseModel):
     industry: Optional[str] = None
 
 
+class CompanyProfileRequest(BaseModel):
+    company_name: Optional[str] = None
+    industries: list[str] = []
+    capabilities: list[str] = []
+    services: list[str] = []
+    target_contract_size: dict = {}
+    geographies: list[str] = []
+    certifications: list[str] = []
+    past_performance_keywords: list[str] = []
+    preferred_project_types: list[str] = []
+    excluded_project_types: list[str] = []
+    capacity_constraints: list[str] = []
+
+
 @app.on_event("startup")
 async def startup():
     init_db()
@@ -64,6 +79,28 @@ async def list_industries():
             for k, v in INDUSTRY_CONTEXT.items()
         ],
     }
+
+
+@app.get("/api/profile")
+async def get_profile():
+    """Return the current company profile. Returns null values when not configured."""
+    from services.profile import PROFILE_PATH
+    import json as _json
+    if not PROFILE_PATH.exists():
+        return {"configured": False, "profile": None}
+    try:
+        raw = _json.loads(PROFILE_PATH.read_text())
+        raw.pop("_note", None)
+        return {"configured": bool(raw.get("company_name")), "profile": raw}
+    except Exception:
+        return {"configured": False, "profile": None}
+
+
+@app.put("/api/profile")
+async def update_profile(body: CompanyProfileRequest):
+    """Save the company profile. Set company_name to enable strategic fit evaluation."""
+    saved = save_profile(body.model_dump())
+    return {"configured": bool(saved.get("company_name")), "profile": saved}
 
 
 @app.post("/api/analyze")
@@ -135,6 +172,7 @@ async def get_rfp(rfp_id: str, db: Session = Depends(get_db)):
         "industry": rfp.industry or "general",
         "requirements": _safe_json_load(rfp.requirements, {}),
         "risks": _safe_json_load(rfp.risks, []),
+        "strategic_fit": _safe_json_load(rfp.strategic_fit, {"status": "unknown"}),
         "proposal": rfp.proposal,
         "score": {
             "score": rfp.score,
@@ -225,7 +263,26 @@ async def _run_analysis(
         requirements = extract_requirements(text)
         risks = identify_risks(requirements, industry=resolved_industry)
         proposal = generate_proposal(requirements, industry=resolved_industry)
-        score_result = score_bid(requirements, industry=resolved_industry)
+        raw_score = score_bid(requirements, industry=resolved_industry)
+
+        # Strategic fit: compare RFP against company profile.
+        # When a configured profile is present the final score is adjusted:
+        #   final = raw_score * 0.80 + strategic_fit_score * 0.20
+        # When no profile is configured the score is unchanged (backward compatible).
+        profile = load_profile()
+        strategic_fit = evaluate_strategic_fit(requirements, profile)
+
+        if strategic_fit.get("status") == "evaluated":
+            fit_score = strategic_fit["score"]
+            adjusted = round(raw_score["score"] * 0.80 + fit_score * 0.20)
+            score_result = {
+                **raw_score,
+                "score": adjusted,
+                "decision": "BID" if adjusted >= 60 else "NO BID",
+                "strategic_fit_weight": 0.20,
+            }
+        else:
+            score_result = raw_score
 
         rfp_id = str(uuid.uuid4())
         rfp = RFP(
@@ -234,6 +291,7 @@ async def _run_analysis(
             original_text=text[:12000],
             requirements=json.dumps(requirements),
             risks=json.dumps(risks),
+            strategic_fit=json.dumps(strategic_fit),
             proposal=proposal,
             score=score_result["score"],
             decision=score_result["decision"],
@@ -251,6 +309,7 @@ async def _run_analysis(
             "industry": resolved_industry,
             "requirements": requirements,
             "risks": risks,
+            "strategic_fit": strategic_fit,
             "proposal": proposal,
             "score": score_result,
             "created_at": rfp.created_at.isoformat(),
