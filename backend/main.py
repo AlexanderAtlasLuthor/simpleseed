@@ -12,6 +12,7 @@ from config import MAX_FILE_BYTES
 from database import get_db, init_db
 from models.rfp import RFP
 from services.extractor import extract_requirements
+from services.feedback import get_all_feedback, get_feedback_for_rfp, get_feedback_summary, record_feedback
 from services.fetcher import fetch_url_text
 from services.generator import generate_proposal
 from services.industry import SUPPORTED_INDUSTRIES, resolve_industry
@@ -43,6 +44,12 @@ class AnalyzeURLRequest(BaseModel):
 
 class SAMAnalyzeRequest(BaseModel):
     industry: Optional[str] = None
+
+
+class FeedbackRequest(BaseModel):
+    outcome: str                       # "won" | "lost" | "no_bid"
+    result_date: Optional[str] = None  # ISO date "YYYY-MM-DD"; defaults to today
+    notes: Optional[str] = None
 
 
 class ScoringConfigWeights(BaseModel):
@@ -115,6 +122,50 @@ async def update_profile(body: CompanyProfileRequest):
     """Save the company profile. Set company_name to enable strategic fit evaluation."""
     saved = save_profile(body.model_dump())
     return {"configured": bool(saved.get("company_name")), "profile": saved}
+
+
+@app.post("/api/rfps/{rfp_id}/feedback")
+async def add_feedback(
+    rfp_id: str, body: FeedbackRequest, db: Session = Depends(get_db)
+):
+    """Record a win/loss/no_bid outcome for a completed analysis."""
+    try:
+        fb = record_feedback(
+            db=db,
+            rfp_id=rfp_id,
+            outcome=body.outcome,
+            result_date=body.result_date,
+            notes=body.notes,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    from services.feedback import _serialize
+    return _serialize(fb)
+
+
+@app.get("/api/rfps/{rfp_id}/feedback")
+async def list_rfp_feedback(rfp_id: str, db: Session = Depends(get_db)):
+    """Return all feedback records for a specific analysis."""
+    return get_feedback_for_rfp(db, rfp_id)
+
+
+@app.get("/api/feedback/summary")
+async def feedback_summary(db: Session = Depends(get_db)):
+    """
+    Return aggregate win/loss metrics and a threshold calibration insight.
+    This is the first concrete use of historical feedback data in the MVP.
+    Win rates are computed from observed outcomes only — no prediction or ML.
+    """
+    return get_feedback_summary(db)
+
+
+@app.get("/api/feedback")
+async def list_feedback(
+    limit: int = Query(default=200, ge=1, le=1000),
+    db: Session = Depends(get_db),
+):
+    """Return recent feedback records across all analyses."""
+    return get_all_feedback(db, limit=limit)
 
 
 @app.get("/api/scoring-config")
