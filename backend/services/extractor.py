@@ -7,6 +7,15 @@ load_dotenv()
 
 _client = None
 
+# Documents within this limit are sent in a single LLM call.
+# 120k chars ≈ 30k tokens — well within Haiku's 200k-token context window.
+# Covers any RFP up to ~60 dense pages.
+_SINGLE_PASS_LIMIT = 120_000
+
+# Chunk parameters for map-reduce on very large documents.
+_CHUNK_SIZE = 40_000   # chars per chunk
+_CHUNK_OVERLAP = 300   # overlap to avoid cutting mid-sentence at boundaries
+
 
 def get_client() -> anthropic.Anthropic:
     global _client
@@ -16,6 +25,23 @@ def get_client() -> anthropic.Anthropic:
 
 
 def extract_requirements(text: str) -> dict:
+    """
+    Extract structured requirements from RFP text.
+
+    Strategy:
+    - text ≤ 120,000 chars → single LLM call with full text
+    - text  > 120,000 chars → map-reduce: chunk → extract each → merge
+    """
+    if len(text) <= _SINGLE_PASS_LIMIT:
+        return _extract_single(text)
+    return _extract_chunked(text)
+
+
+# ---------------------------------------------------------------------------
+# Single-pass extraction (one LLM call, full text)
+# ---------------------------------------------------------------------------
+
+def _extract_single(text: str) -> dict:
     prompt = f"""Analyze this RFP (Request for Proposal) and extract structured information.
 
 Return a JSON object with exactly these fields:
@@ -29,7 +55,7 @@ Return a JSON object with exactly these fields:
 - "keywords": array of strings — 5-10 important keywords/topics
 
 RFP TEXT:
-{text[:8000]}
+{text}
 
 Return only valid JSON. No markdown, no extra text."""
 
@@ -48,13 +74,80 @@ Return only valid JSON. No markdown, no extra text."""
             content = content.split("```")[1].split("```")[0].strip()
         return json.loads(content)
     except Exception:
-        return {
-            "summary": content[:500],
-            "client": None,
-            "deadline": None,
-            "budget": None,
-            "requirements": [],
-            "evaluation_criteria": [],
-            "deliverables": [],
-            "keywords": [],
-        }
+        return _empty_result(summary=content[:500])
+
+
+# ---------------------------------------------------------------------------
+# Map-reduce for very large documents (> 120k chars)
+# ---------------------------------------------------------------------------
+
+def _extract_chunked(text: str) -> dict:
+    chunks = _split_into_chunks(text)
+    partials = [_extract_single(chunk) for chunk in chunks]
+    return _merge_extractions(partials)
+
+
+def _split_into_chunks(text: str) -> list[str]:
+    """Split text into overlapping chunks, breaking at newlines when possible."""
+    chunks = []
+    start = 0
+    while start < len(text):
+        end = min(start + _CHUNK_SIZE, len(text))
+
+        # If not at the end, try to break at the last newline within a 500-char window
+        if end < len(text):
+            newline = text.rfind("\n", end - 500, end)
+            if newline > start:
+                end = newline
+
+        chunks.append(text[start:end])
+        start = end - _CHUNK_OVERLAP  # overlap to preserve cross-boundary context
+
+    return chunks
+
+
+def _merge_extractions(partials: list[dict]) -> dict:
+    """
+    Merge N partial extractions into one.
+    - Scalar fields (client, deadline, budget): first non-null value wins.
+    - summary: taken from the first chunk (contains document intro).
+    - Array fields: union, deduplicating by normalized text.
+    """
+    merged = _empty_result(summary=partials[0].get("summary", "") if partials else "")
+
+    seen: dict[str, set] = {
+        "requirements": set(),
+        "evaluation_criteria": set(),
+        "deliverables": set(),
+        "keywords": set(),
+    }
+
+    for partial in partials:
+        if not merged["client"] and partial.get("client"):
+            merged["client"] = partial["client"]
+        if not merged["deadline"] and partial.get("deadline"):
+            merged["deadline"] = partial["deadline"]
+        if not merged["budget"] and partial.get("budget"):
+            merged["budget"] = partial["budget"]
+
+        for field in ("requirements", "evaluation_criteria", "deliverables", "keywords"):
+            for item in partial.get(field) or []:
+                key = item.lower().strip()
+                if key and key not in seen[field]:
+                    seen[field].add(key)
+                    merged[field].append(item)
+
+    return merged
+
+
+def _empty_result(summary: str = "") -> dict:
+    return {
+        "summary": summary,
+        "client": None,
+        "deadline": None,
+        "budget": None,
+        "requirements": [],
+        "evaluation_criteria": [],
+        "deliverables": [],
+        "keywords": [],
+    }
