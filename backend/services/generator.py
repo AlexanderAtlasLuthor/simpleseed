@@ -14,6 +14,11 @@ def get_client() -> anthropic.Anthropic:
     return _client
 
 
+def _req_text(r) -> str:
+    """Extract plain text from a requirement — handles both string and classified dict."""
+    return r["text"] if isinstance(r, dict) else str(r)
+
+
 def generate_proposal(requirements: dict | str) -> str:
     if isinstance(requirements, dict):
         req_text = f"""Summary: {requirements.get('summary', 'N/A')}
@@ -22,7 +27,7 @@ Budget: {requirements.get('budget', 'N/A')}
 Deadline: {requirements.get('deadline', 'N/A')}
 
 Key Requirements:
-{chr(10).join(f'- {r}' for r in requirements.get('requirements', []))}
+{chr(10).join(f'- {_req_text(r)}' for r in requirements.get('requirements', []))}
 
 Deliverables:
 {chr(10).join(f'- {d}' for d in requirements.get('deliverables', []))}

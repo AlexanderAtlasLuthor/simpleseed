@@ -1,9 +1,15 @@
+interface RequirementItem {
+  text: string;
+  category: "mandatory" | "optional" | "unclear";
+  reason?: string;
+}
+
 interface Requirements {
   summary?: string;
   client?: string | null;
   deadline?: string | null;
   budget?: string | null;
-  requirements?: string[];
+  requirements?: (string | RequirementItem)[];
   evaluation_criteria?: string[];
   deliverables?: string[];
   keywords?: string[];
@@ -33,6 +39,42 @@ function StringList({ items, color = "seed" }: { items?: string[]; color?: strin
           <span className="text-[#d1fae5]">{item}</span>
         </li>
       ))}
+    </ul>
+  );
+}
+
+const CATEGORY_STYLES: Record<string, string> = {
+  mandatory: "bg-red-950/40 border-red-900/50 text-red-400",
+  optional:  "bg-blue-950/40 border-blue-900/50 text-blue-400",
+  unclear:   "bg-[#1e2d22] border-[#1e2d22] text-[#6b8f72]",
+};
+
+function RequirementsList({ items }: { items?: (string | RequirementItem)[] }) {
+  if (!items?.length) return <p className="text-sm text-[#6b8f72]">None identified</p>;
+  return (
+    <ul className="space-y-2">
+      {items.map((item, i) => {
+        const isObj = typeof item === "object" && item !== null;
+        const text = isObj ? item.text : item;
+        const category = isObj ? item.category : null;
+        const reason = isObj ? item.reason : null;
+        return (
+          <li key={i} className="flex gap-2 text-sm">
+            <span className="text-seed-500 mt-0.5 shrink-0">▸</span>
+            <div className="flex-1 min-w-0">
+              <span className="text-[#d1fae5]">{text}</span>
+              {category && (
+                <span
+                  className={`ml-2 text-[10px] px-1.5 py-0.5 rounded border align-middle ${CATEGORY_STYLES[category] ?? CATEGORY_STYLES.unclear}`}
+                  title={reason ?? undefined}
+                >
+                  {category}
+                </span>
+              )}
+            </div>
+          </li>
+        );
+      })}
     </ul>
   );
 }
@@ -68,7 +110,7 @@ export default function RequirementsView({ requirements }: Props) {
       )}
 
       <Section title="Requirements">
-        <StringList items={requirements.requirements} />
+        <RequirementsList items={requirements.requirements} />
       </Section>
 
       <Section title="Deliverables">

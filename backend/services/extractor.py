@@ -49,7 +49,16 @@ Return a JSON object with exactly these fields:
 - "client": string or null — organization name if mentioned
 - "deadline": string or null — submission deadline if mentioned
 - "budget": string or null — budget range if mentioned
-- "requirements": array of strings — key technical and functional requirements
+- "requirements": array of objects — each requirement classified by type:
+  {{
+    "text": string — the requirement exactly as stated or closely paraphrased,
+    "category": "mandatory" | "optional" | "unclear",
+    "reason": string — brief signal justifying the classification
+  }}
+  Classification rules:
+  - "mandatory": language like must, shall, will, required, mandatory, is required to, needs to
+  - "optional": language like should, preferred, desirable, nice to have, may, could, ideally, if possible, encouraged to
+  - "unclear": no explicit qualifier, generic or implied statement, ambiguous phrasing
 - "evaluation_criteria": array of strings — how proposals will be evaluated
 - "deliverables": array of strings — expected deliverables
 - "keywords": array of strings — 5-10 important keywords/topics
@@ -132,7 +141,9 @@ def _merge_extractions(partials: list[dict]) -> dict:
 
         for field in ("requirements", "evaluation_criteria", "deliverables", "keywords"):
             for item in partial.get(field) or []:
-                key = item.lower().strip()
+                # requirements items are dicts {text, category, reason}; others are strings
+                key = (item.get("text") if isinstance(item, dict) else item)
+                key = (key or "").lower().strip()
                 if key and key not in seen[field]:
                     seen[field].add(key)
                     merged[field].append(item)
