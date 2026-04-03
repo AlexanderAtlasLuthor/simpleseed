@@ -300,6 +300,8 @@ async def get_rfp(rfp_id: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="RFP not found")
 
     knowledge_refs = _safe_json_load(rfp.knowledge_refs, [])
+    grounding = _safe_json_load(rfp.grounding_report, {})
+    evidence_used = grounding.get("evidence_used", [])
     return {
         "id": rfp.id,
         "filename": rfp.filename,
@@ -320,6 +322,14 @@ async def get_rfp(rfp_id: str, db: Session = Depends(get_db)):
             for r in knowledge_refs
         ],
         "knowledge_status": "used" if knowledge_refs else "no_relevant_documents_found",
+        "evidence_used": evidence_used,
+        "information_gaps": grounding.get("information_gaps", []),
+        "unsupported_claims_avoided": grounding.get("unsupported_claims_avoided", []),
+        "grounding_status": (
+            "grounded_with_kb" if any(e.get("source") == "internal_document" for e in evidence_used)
+            else "rfp_only" if evidence_used
+            else "ungrounded"
+        ),
         "created_at": rfp.created_at.isoformat(),
     }
 
@@ -412,11 +422,16 @@ async def _run_analysis(
         kb_query = " ".join(kb_query_parts).strip()
         knowledge_results = search_knowledge(kb_query) if kb_query else []
 
-        proposal = generate_proposal(
+        proposal_result = generate_proposal(
             requirements,
             industry=resolved_industry,
             knowledge_context=knowledge_results,
         )
+        proposal_text             = proposal_result["proposal"]
+        information_gaps          = proposal_result.get("information_gaps", [])
+        unsupported_claims_avoided = proposal_result.get("unsupported_claims_avoided", [])
+        evidence_used             = proposal_result.get("evidence_used", [])
+
         raw_score = score_bid(requirements, industry=resolved_industry)
 
         # Strategic fit: compare RFP against company profile.
@@ -450,6 +465,17 @@ async def _run_analysis(
         ]
         knowledge_status = "used" if knowledge_results else "no_relevant_documents_found"
 
+        grounding_report = {
+            "information_gaps": information_gaps,
+            "unsupported_claims_avoided": unsupported_claims_avoided,
+            "evidence_used": evidence_used,
+        }
+        grounding_status = (
+            "grounded_with_kb" if any(e.get("source") == "internal_document" for e in evidence_used)
+            else "rfp_only" if evidence_used
+            else "ungrounded"
+        )
+
         rfp_id = str(uuid.uuid4())
         rfp = RFP(
             id=rfp_id,
@@ -458,13 +484,14 @@ async def _run_analysis(
             requirements=json.dumps(requirements),
             risks=json.dumps(risks),
             strategic_fit=json.dumps(strategic_fit),
-            proposal=proposal,
+            proposal=proposal_text,
             score=score_result["score"],
             decision=score_result["decision"],
             score_breakdown=json.dumps(score_result["breakdown"]),
             reasoning=score_result["reasoning"],
             industry=resolved_industry,
             knowledge_refs=json.dumps(knowledge_results),
+            grounding_report=json.dumps(grounding_report),
         )
         db.add(rfp)
         db.commit()
@@ -477,11 +504,15 @@ async def _run_analysis(
             "requirements": requirements,
             "risks": risks,
             "strategic_fit": strategic_fit,
-            "proposal": proposal,
+            "proposal": proposal_text,
             "score": score_result,
             "knowledge_results": knowledge_results,
             "knowledge_used": knowledge_used,
             "knowledge_status": knowledge_status,
+            "evidence_used": evidence_used,
+            "information_gaps": information_gaps,
+            "unsupported_claims_avoided": unsupported_claims_avoided,
+            "grounding_status": grounding_status,
             "created_at": rfp.created_at.isoformat(),
         }
     except HTTPException:

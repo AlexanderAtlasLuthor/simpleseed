@@ -33,6 +33,8 @@ def _migrate():
             conn.execute(text("ALTER TABLE rfps ADD COLUMN strategic_fit TEXT DEFAULT '{}'"))
         if "knowledge_refs" not in existing:
             conn.execute(text("ALTER TABLE rfps ADD COLUMN knowledge_refs TEXT DEFAULT '[]'"))
+        if "grounding_report" not in existing:
+            conn.execute(text("ALTER TABLE rfps ADD COLUMN grounding_report TEXT DEFAULT '{}'"))
         conn.commit()
 
 

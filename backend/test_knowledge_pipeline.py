@@ -81,26 +81,31 @@ with patch.object(gen_mod, "get_client") as mock_client:
         "keywords": ["healthcare", "cloud", "HIPAA", "EHR"],
     }
 
-    # With knowledge context
-    proposal_with_kb = gen_mod.generate_proposal(
+    # With knowledge context — generate_proposal now returns a dict
+    result_with_kb = gen_mod.generate_proposal(
         requirements,
         industry="healthcare",
         knowledge_context=results,
     )
 
-    assert proposal_with_kb == "MOCK PROPOSAL"
+    assert isinstance(result_with_kb, dict), "generate_proposal must return a dict"
+    assert "proposal" in result_with_kb
+    assert "information_gaps" in result_with_kb
+    assert "unsupported_claims_avoided" in result_with_kb
+    assert "evidence_used" in result_with_kb
+    assert result_with_kb["proposal"] == "MOCK PROPOSAL"
     prompt_text = captured_prompt["content"]
     assert "INTERNAL KNOWLEDGE BASE" in prompt_text, \
         "Prompt must contain KB section when context is provided"
     assert _DOC_ID in prompt_text or "doc_healthcarepast" in prompt_text, \
         "Prompt must reference the document id"
-    assert "relevance" in prompt_text.lower(), \
+    assert "keyword_overlap" in prompt_text.lower() or "relevance" in prompt_text.lower(), \
         "Prompt should mention relevance score"
-    print("Case 4 PASS: knowledge_context injected into generator prompt")
+    print("Case 4 PASS: knowledge_context injected into generator prompt, returns dict")
 
     # Without knowledge context (empty list)
     captured_prompt.clear()
-    proposal_no_kb = gen_mod.generate_proposal(
+    result_no_kb = gen_mod.generate_proposal(
         requirements,
         industry="healthcare",
         knowledge_context=[],
@@ -108,14 +113,16 @@ with patch.object(gen_mod, "get_client") as mock_client:
     prompt_text_no_kb = captured_prompt["content"]
     assert "INTERNAL KNOWLEDGE BASE" not in prompt_text_no_kb, \
         "Prompt must NOT contain KB section when context is empty"
+    assert isinstance(result_no_kb, dict)
     print("Case 5 PASS: empty knowledge_context → no KB section in prompt (clean fallback)")
 
     # Without knowledge_context param at all (backward compat)
     captured_prompt.clear()
-    proposal_compat = gen_mod.generate_proposal(requirements, industry="healthcare")
+    result_compat = gen_mod.generate_proposal(requirements, industry="healthcare")
     prompt_compat = captured_prompt["content"]
     assert "INTERNAL KNOWLEDGE BASE" not in prompt_compat, \
         "Omitting knowledge_context must not break existing callers"
+    assert isinstance(result_compat, dict)
     print("Case 6 PASS: omitting knowledge_context is backward-compatible")
 
 

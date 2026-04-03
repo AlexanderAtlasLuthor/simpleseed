@@ -19,4 +19,5 @@ class RFP(Base):
     risks = Column(Text, nullable=True, default="[]")
     strategic_fit = Column(Text, nullable=True, default="{}")
     knowledge_refs = Column(Text, nullable=True, default="[]")
+    grounding_report = Column(Text, nullable=True, default="{}")
     created_at = Column(DateTime, server_default=func.now())
