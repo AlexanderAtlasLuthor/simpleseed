@@ -20,7 +20,11 @@ def _req_text(r) -> str:
     return r["text"] if isinstance(r, dict) else str(r)
 
 
-def generate_proposal(requirements: dict | str, industry: Optional[str] = None) -> str:
+def generate_proposal(
+    requirements: dict | str,
+    industry: Optional[str] = None,
+    knowledge_context: list | None = None,
+) -> str:
     from services.industry import get_industry_context
     ctx = get_industry_context(industry)
 
@@ -46,6 +50,28 @@ Evaluation Criteria:
         if ctx["relevant_domains"] else ""
     )
 
+    # Build the internal knowledge section only when relevant docs were found
+    kb_section = ""
+    if knowledge_context:
+        doc_blocks = []
+        for i, doc in enumerate(knowledge_context, start=1):
+            doc_blocks.append(
+                f"[{i}] {doc['filename']} (id: {doc['document_id']}, "
+                f"relevance: {doc['relevance_score']} keyword matches)\n"
+                f"    Excerpt: \"{doc['snippet'][:400]}\""
+            )
+        kb_section = (
+            "\n\nINTERNAL KNOWLEDGE BASE — RELEVANT PAST WORK:\n"
+            f"{len(knowledge_context)} document(s) retrieved by keyword matching "
+            "against this RFP's topics.\n\n"
+            + "\n\n".join(doc_blocks)
+            + "\n\nInstructions for using this context:"
+            "\n- Reference specific past experience where it strengthens credibility."
+            "\n- Synthesize naturally — do not copy excerpts verbatim."
+            "\n- If a past project is directly relevant, cite it concretely (e.g. "
+            "'In a similar engagement...').\n"
+        )
+
     prompt = f"""Write a professional proposal draft for this RFP.
 
 VENDOR CONTEXT:
@@ -54,7 +80,7 @@ Industry focus: {ctx['focus']}
 Tone: {ctx['tone']}
 
 REQUIREMENTS:
-{req_text}
+{req_text}{kb_section}
 
 Write the proposal with these sections:
 1. Executive Summary

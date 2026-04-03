@@ -46,10 +46,10 @@ def search_knowledge(query: str, top_k: int = 3) -> list[dict]:
                 "document_id": doc_path.stem,
                 "filename": doc_path.name,
                 "snippet": content[:500],
-                "relevance": overlap,
+                "relevance_score": overlap,
             })
 
-    results.sort(key=lambda x: x["relevance"], reverse=True)
+    results.sort(key=lambda x: x["relevance_score"], reverse=True)
     return results[:top_k]
 
 

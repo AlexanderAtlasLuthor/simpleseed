@@ -13,7 +13,7 @@ from database import get_db, init_db
 from models.rfp import RFP
 from services.extractor import extract_requirements
 from services.feedback import get_all_feedback, get_feedback_for_rfp, get_feedback_summary, record_feedback
-from services.knowledge import get_document, list_documents, upload_document
+from services.knowledge import get_document, list_documents, search_knowledge, upload_document
 from services.fetcher import fetch_url_text
 from services.generator import generate_proposal
 from services.industry import SUPPORTED_INDUSTRIES, resolve_industry
@@ -299,6 +299,7 @@ async def get_rfp(rfp_id: str, db: Session = Depends(get_db)):
     if not rfp:
         raise HTTPException(status_code=404, detail="RFP not found")
 
+    knowledge_refs = _safe_json_load(rfp.knowledge_refs, [])
     return {
         "id": rfp.id,
         "filename": rfp.filename,
@@ -313,6 +314,12 @@ async def get_rfp(rfp_id: str, db: Session = Depends(get_db)):
             "breakdown": _safe_json_load(rfp.score_breakdown, {}),
             "reasoning": rfp.reasoning,
         },
+        "knowledge_results": knowledge_refs,
+        "knowledge_used": [
+            {"document_id": r["document_id"], "filename": r["filename"]}
+            for r in knowledge_refs
+        ],
+        "knowledge_status": "used" if knowledge_refs else "no_relevant_documents_found",
         "created_at": rfp.created_at.isoformat(),
     }
 
@@ -395,7 +402,21 @@ async def _run_analysis(
     try:
         requirements = extract_requirements(text)
         risks = identify_risks(requirements, industry=resolved_industry)
-        proposal = generate_proposal(requirements, industry=resolved_industry)
+
+        # ── Knowledge retrieval ──────────────────────────────────────────────
+        # Build query from extracted keywords + summary (best available signal
+        # from the RFP without an extra LLM call).
+        kb_query_parts = list(requirements.get("keywords") or [])
+        if requirements.get("summary"):
+            kb_query_parts.append(requirements["summary"])
+        kb_query = " ".join(kb_query_parts).strip()
+        knowledge_results = search_knowledge(kb_query) if kb_query else []
+
+        proposal = generate_proposal(
+            requirements,
+            industry=resolved_industry,
+            knowledge_context=knowledge_results,
+        )
         raw_score = score_bid(requirements, industry=resolved_industry)
 
         # Strategic fit: compare RFP against company profile.
@@ -422,6 +443,13 @@ async def _run_analysis(
         else:
             score_result = raw_score
 
+        # ── Knowledge traceability ───────────────────────────────────────────
+        knowledge_used = [
+            {"document_id": r["document_id"], "filename": r["filename"]}
+            for r in knowledge_results
+        ]
+        knowledge_status = "used" if knowledge_results else "no_relevant_documents_found"
+
         rfp_id = str(uuid.uuid4())
         rfp = RFP(
             id=rfp_id,
@@ -436,6 +464,7 @@ async def _run_analysis(
             score_breakdown=json.dumps(score_result["breakdown"]),
             reasoning=score_result["reasoning"],
             industry=resolved_industry,
+            knowledge_refs=json.dumps(knowledge_results),
         )
         db.add(rfp)
         db.commit()
@@ -450,6 +479,9 @@ async def _run_analysis(
             "strategic_fit": strategic_fit,
             "proposal": proposal,
             "score": score_result,
+            "knowledge_results": knowledge_results,
+            "knowledge_used": knowledge_used,
+            "knowledge_status": knowledge_status,
             "created_at": rfp.created_at.isoformat(),
         }
     except HTTPException:
