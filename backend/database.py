@@ -14,8 +14,9 @@ class Base(DeclarativeBase):
 
 
 def init_db():
-    from models.rfp import RFP          # noqa: F401
-    from models.feedback import Feedback  # noqa: F401
+    from models.rfp import RFP                              # noqa: F401
+    from models.feedback import Feedback                    # noqa: F401
+    from models.knowledge_document import KnowledgeDocument # noqa: F401
     Base.metadata.create_all(bind=engine)
     _migrate()
 

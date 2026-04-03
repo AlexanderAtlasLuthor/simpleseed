@@ -13,6 +13,7 @@ from database import get_db, init_db
 from models.rfp import RFP
 from services.extractor import extract_requirements
 from services.feedback import get_all_feedback, get_feedback_for_rfp, get_feedback_summary, record_feedback
+from services.knowledge import get_document, list_documents, upload_document
 from services.fetcher import fetch_url_text
 from services.generator import generate_proposal
 from services.industry import SUPPORTED_INDUSTRIES, resolve_industry
@@ -166,6 +167,53 @@ async def list_feedback(
 ):
     """Return recent feedback records across all analyses."""
     return get_all_feedback(db, limit=limit)
+
+
+# ---------------------------------------------------------------------------
+# Knowledge base endpoints
+# ---------------------------------------------------------------------------
+
+@app.post("/api/knowledge")
+async def upload_knowledge_document(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
+    """
+    Upload a PDF or plain-text file to the internal knowledge base.
+    The extracted text is indexed for keyword search via GET /api/knowledge/search.
+    """
+    file_bytes = await file.read()
+    try:
+        doc = upload_document(
+            db=db,
+            filename=file.filename or "upload",
+            content_type=file.content_type or "",
+            file_bytes=file_bytes,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    from services.knowledge import _serialize
+    result = _serialize(doc)
+    return {
+        "success": doc.processing_status == "completed",
+        **result,
+    }
+
+
+@app.get("/api/knowledge")
+async def list_knowledge_documents(db: Session = Depends(get_db)):
+    """List all documents in the knowledge base with their metadata."""
+    return list_documents(db)
+
+
+@app.get("/api/knowledge/{doc_id}")
+async def get_knowledge_document(doc_id: str, db: Session = Depends(get_db)):
+    """Get metadata for a specific knowledge document."""
+    doc = get_document(db, doc_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return doc
 
 
 @app.get("/api/scoring-config")

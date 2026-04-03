@@ -28,6 +28,9 @@ export default function Navbar() {
           <Link href="/history" className={linkClass("/history")}>
             History
           </Link>
+          <Link href="/knowledge" className={linkClass("/knowledge")}>
+            Knowledge
+          </Link>
         </div>
       </div>
     </nav>
