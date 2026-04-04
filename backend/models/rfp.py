@@ -20,4 +20,8 @@ class RFP(Base):
     strategic_fit = Column(Text, nullable=True, default="{}")
     knowledge_refs = Column(Text, nullable=True, default="[]")
     grounding_report = Column(Text, nullable=True, default="{}")
+    pipeline_status = Column(String, default="completed")   # processing | completed | partial_failure
+    failed_step = Column(String, nullable=True)             # which step failed, if any
+    completed_steps = Column(Text, default="[]")            # JSON list of step names
+    pipeline_error = Column(Text, nullable=True)            # JSON {type, message}
     created_at = Column(DateTime, server_default=func.now())

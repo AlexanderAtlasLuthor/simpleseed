@@ -35,6 +35,14 @@ def _migrate():
             conn.execute(text("ALTER TABLE rfps ADD COLUMN knowledge_refs TEXT DEFAULT '[]'"))
         if "grounding_report" not in existing:
             conn.execute(text("ALTER TABLE rfps ADD COLUMN grounding_report TEXT DEFAULT '{}'"))
+        if "pipeline_status" not in existing:
+            conn.execute(text("ALTER TABLE rfps ADD COLUMN pipeline_status TEXT DEFAULT 'completed'"))
+        if "failed_step" not in existing:
+            conn.execute(text("ALTER TABLE rfps ADD COLUMN failed_step TEXT"))
+        if "completed_steps" not in existing:
+            conn.execute(text("ALTER TABLE rfps ADD COLUMN completed_steps TEXT DEFAULT '[]'"))
+        if "pipeline_error" not in existing:
+            conn.execute(text("ALTER TABLE rfps ADD COLUMN pipeline_error TEXT"))
         conn.commit()
 
 

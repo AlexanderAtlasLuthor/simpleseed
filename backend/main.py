@@ -1,3 +1,4 @@
+import asyncio
 import json
 import uuid
 from typing import Optional
@@ -286,6 +287,8 @@ async def list_rfps(db: Session = Depends(get_db)):
             "score": r.score,
             "decision": r.decision,
             "industry": r.industry or "general",
+            "pipeline_status": r.pipeline_status or "completed",
+            "failed_step": r.failed_step,
             "created_at": r.created_at.isoformat(),
             "summary": _safe_json_load(r.requirements, {}).get("summary", ""),
         }
@@ -330,6 +333,10 @@ async def get_rfp(rfp_id: str, db: Session = Depends(get_db)):
             else "rfp_only" if evidence_used
             else "ungrounded"
         ),
+        "status": rfp.pipeline_status or "completed",
+        "failed_step": rfp.failed_step,
+        "completed_steps": _safe_json_load(rfp.completed_steps, []),
+        "error": _safe_json_load(rfp.pipeline_error, None),
         "created_at": rfp.created_at.isoformat(),
     }
 
@@ -397,54 +404,113 @@ async def sam_analyze(
 
 
 # ---------------------------------------------------------------------------
-# Shared analysis pipeline
+# Shared analysis pipeline  (resilient per-step version)
 # ---------------------------------------------------------------------------
 
 async def _run_analysis(
     text: str, filename: str, db: Session, industry: Optional[str] = None
 ) -> dict:
-    """Run the full extract → generate → score pipeline and persist."""
+    """
+    Run the extract → risks → proposal → score pipeline.
+
+    Each step is isolated: results are committed to DB immediately after the
+    step succeeds.  If a step fails (after 1 retry for LLM steps), the already-
+    committed partial results are returned with status="partial_failure" instead
+    of raising HTTP 500 and losing everything.
+    """
     if not text.strip():
         raise HTTPException(status_code=400, detail="No text content could be extracted.")
 
     resolved_industry = resolve_industry(industry)
+    rfp_id = str(uuid.uuid4())
+    completed_steps: list[str] = []
 
+    # Create the record immediately so it exists even if the pipeline fails.
+    rfp = RFP(
+        id=rfp_id,
+        filename=filename,
+        original_text=text[:12000],
+        industry=resolved_industry,
+        pipeline_status="processing",
+        completed_steps="[]",
+        score=0,
+        decision="NO BID",
+        score_breakdown="{}",
+        reasoning="",
+        requirements="{}",
+        risks="[]",
+        strategic_fit="{}",
+        knowledge_refs="[]",
+        grounding_report="{}",
+    )
     try:
-        requirements = extract_requirements(text)
+        db.add(rfp)
+        db.commit()
+        db.refresh(rfp)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database error on record creation: {e}")
+
+    # ── Step 1: requirement extraction + risks + KB retrieval ────────────────
+    requirements: dict = {}
+    risks: list = []
+    knowledge_results: list = []
+    try:
+        requirements = await _llm_with_retry(extract_requirements, text)
         risks = identify_risks(requirements, industry=resolved_industry)
 
-        # ── Knowledge retrieval ──────────────────────────────────────────────
-        # Build query from extracted keywords + summary (best available signal
-        # from the RFP without an extra LLM call).
         kb_query_parts = list(requirements.get("keywords") or [])
         if requirements.get("summary"):
             kb_query_parts.append(requirements["summary"])
         kb_query = " ".join(kb_query_parts).strip()
         knowledge_results = search_knowledge(kb_query) if kb_query else []
 
-        proposal_result = generate_proposal(
+        rfp.requirements = json.dumps(requirements)
+        rfp.risks = json.dumps(risks)
+        rfp.knowledge_refs = json.dumps(knowledge_results)
+        completed_steps.append("requirement_extraction")
+        rfp.completed_steps = json.dumps(completed_steps)
+        db.commit()
+    except Exception as exc:
+        return _record_pipeline_failure(db, rfp, completed_steps, "requirement_extraction", exc)
+
+    # ── Step 2: proposal generation ──────────────────────────────────────────
+    proposal_text: str = ""
+    grounding_report: dict = {}
+    try:
+        proposal_result = await _llm_with_retry(
+            generate_proposal,
             requirements,
             industry=resolved_industry,
             knowledge_context=knowledge_results,
         )
-        proposal_text             = proposal_result["proposal"]
-        information_gaps          = proposal_result.get("information_gaps", [])
-        unsupported_claims_avoided = proposal_result.get("unsupported_claims_avoided", [])
-        evidence_used             = proposal_result.get("evidence_used", [])
+        proposal_text = proposal_result["proposal"]
+        grounding_report = {
+            "information_gaps":           proposal_result.get("information_gaps", []),
+            "unsupported_claims_avoided": proposal_result.get("unsupported_claims_avoided", []),
+            "evidence_used":              proposal_result.get("evidence_used", []),
+        }
 
-        raw_score = score_bid(requirements, industry=resolved_industry)
+        rfp.proposal = proposal_text
+        rfp.grounding_report = json.dumps(grounding_report)
+        completed_steps.append("proposal_generation")
+        rfp.completed_steps = json.dumps(completed_steps)
+        db.commit()
+    except Exception as exc:
+        return _record_pipeline_failure(db, rfp, completed_steps, "proposal_generation", exc)
 
-        # Strategic fit: compare RFP against company profile.
-        # When a configured profile is present, the final score is blended:
-        #   final = raw_score * (1 - sf_weight) + strategic_fit_score * sf_weight
-        # When no profile is configured, the score is unchanged (backward compatible).
-        # All three values (sf_weight, bid_threshold) come from scoring_config.json.
+    # ── Step 3: bid scoring + strategic fit ──────────────────────────────────
+    # score_bid has an internal heuristic fallback so it rarely raises, but we
+    # still isolate it to protect the proposal already committed above.
+    score_result: dict = {}
+    strategic_fit: dict = {"status": "unknown"}
+    try:
         scoring_cfg = load_scoring_config()
         sf_weight = float(scoring_cfg["strategic_fit_weight"])
         bid_threshold = float(scoring_cfg["bid_threshold"])
 
         profile = load_profile()
         strategic_fit = evaluate_strategic_fit(requirements, profile)
+        raw_score = score_bid(requirements, industry=resolved_industry)
 
         if strategic_fit.get("status") == "evaluated":
             fit_score = strategic_fit["score"]
@@ -458,67 +524,127 @@ async def _run_analysis(
         else:
             score_result = raw_score
 
-        # ── Knowledge traceability ───────────────────────────────────────────
-        knowledge_used = [
-            {"document_id": r["document_id"], "filename": r["filename"]}
-            for r in knowledge_results
-        ]
-        knowledge_status = "used" if knowledge_results else "no_relevant_documents_found"
-
-        grounding_report = {
-            "information_gaps": information_gaps,
-            "unsupported_claims_avoided": unsupported_claims_avoided,
-            "evidence_used": evidence_used,
-        }
-        grounding_status = (
-            "grounded_with_kb" if any(e.get("source") == "internal_document" for e in evidence_used)
-            else "rfp_only" if evidence_used
-            else "ungrounded"
-        )
-
-        rfp_id = str(uuid.uuid4())
-        rfp = RFP(
-            id=rfp_id,
-            filename=filename,
-            original_text=text[:12000],
-            requirements=json.dumps(requirements),
-            risks=json.dumps(risks),
-            strategic_fit=json.dumps(strategic_fit),
-            proposal=proposal_text,
-            score=score_result["score"],
-            decision=score_result["decision"],
-            score_breakdown=json.dumps(score_result["breakdown"]),
-            reasoning=score_result["reasoning"],
-            industry=resolved_industry,
-            knowledge_refs=json.dumps(knowledge_results),
-            grounding_report=json.dumps(grounding_report),
-        )
-        db.add(rfp)
+        rfp.score = score_result["score"]
+        rfp.decision = score_result["decision"]
+        rfp.score_breakdown = json.dumps(score_result["breakdown"])
+        rfp.reasoning = score_result["reasoning"]
+        rfp.strategic_fit = json.dumps(strategic_fit)
+        completed_steps.append("bid_scoring")
+        rfp.pipeline_status = "completed"
+        rfp.completed_steps = json.dumps(completed_steps)
         db.commit()
         db.refresh(rfp)
+    except Exception as exc:
+        return _record_pipeline_failure(db, rfp, completed_steps, "bid_scoring", exc)
 
-        return {
-            "id": rfp.id,
-            "filename": rfp.filename,
-            "industry": resolved_industry,
-            "requirements": requirements,
-            "risks": risks,
-            "strategic_fit": strategic_fit,
-            "proposal": proposal_text,
-            "score": score_result,
-            "knowledge_results": knowledge_results,
-            "knowledge_used": knowledge_used,
-            "knowledge_status": knowledge_status,
-            "evidence_used": evidence_used,
-            "information_gaps": information_gaps,
-            "unsupported_claims_avoided": unsupported_claims_avoided,
-            "grounding_status": grounding_status,
-            "created_at": rfp.created_at.isoformat(),
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    # ── All steps completed ──────────────────────────────────────────────────
+    knowledge_used = [
+        {"document_id": r["document_id"], "filename": r["filename"]}
+        for r in knowledge_results
+    ]
+    knowledge_status = "used" if knowledge_results else "no_relevant_documents_found"
+    evidence_used = grounding_report.get("evidence_used", [])
+    grounding_status = (
+        "grounded_with_kb" if any(e.get("source") == "internal_document" for e in evidence_used)
+        else "rfp_only" if evidence_used
+        else "ungrounded"
+    )
+
+    return {
+        "id": rfp.id,
+        "filename": rfp.filename,
+        "status": "completed",
+        "failed_step": None,
+        "completed_steps": completed_steps,
+        "industry": resolved_industry,
+        "requirements": requirements,
+        "risks": risks,
+        "strategic_fit": strategic_fit,
+        "proposal": proposal_text,
+        "score": score_result,
+        "knowledge_results": knowledge_results,
+        "knowledge_used": knowledge_used,
+        "knowledge_status": knowledge_status,
+        "evidence_used": evidence_used,
+        "information_gaps": grounding_report.get("information_gaps", []),
+        "unsupported_claims_avoided": grounding_report.get("unsupported_claims_avoided", []),
+        "grounding_status": grounding_status,
+        "error": None,
+        "created_at": rfp.created_at.isoformat(),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Pipeline helpers
+# ---------------------------------------------------------------------------
+
+async def _llm_with_retry(fn, *args, max_retries: int = 1, retry_delay: float = 2.0, **kwargs):
+    """
+    Call fn(*args, **kwargs), retrying once after a delay on any exception.
+    Covers transient LLM errors (timeouts, rate limits, connection drops).
+    """
+    last_exc: Exception | None = None
+    for attempt in range(max_retries + 1):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as exc:
+            last_exc = exc
+            if attempt < max_retries:
+                await asyncio.sleep(retry_delay)
+    raise last_exc  # type: ignore[misc]
+
+
+def _record_pipeline_failure(
+    db: Session,
+    rfp: RFP,
+    completed_steps: list[str],
+    failed_step: str,
+    exc: Exception,
+) -> dict:
+    """
+    Persist the failure state and return a structured partial response.
+    Already-committed step results remain in the DB and are included in
+    the response so the caller receives the maximum useful partial output.
+    """
+    error = {"type": type(exc).__name__, "message": str(exc)[:500]}
+    rfp.pipeline_status = "partial_failure"
+    rfp.failed_step = failed_step
+    rfp.pipeline_error = json.dumps(error)
+    rfp.completed_steps = json.dumps(completed_steps)
+    try:
+        db.commit()
+    except Exception:
+        pass  # best-effort — don't shadow the original error
+
+    knowledge_refs = _safe_json_load(rfp.knowledge_refs, [])
+    grounding = _safe_json_load(rfp.grounding_report, {})
+    evidence_used = grounding.get("evidence_used", [])
+
+    return {
+        "id": rfp.id,
+        "filename": rfp.filename,
+        "status": "partial_failure",
+        "failed_step": failed_step,
+        "completed_steps": completed_steps,
+        "industry": rfp.industry or "general",
+        "requirements": _safe_json_load(rfp.requirements, None),
+        "risks": _safe_json_load(rfp.risks, None),
+        "strategic_fit": None,
+        "proposal": rfp.proposal,
+        "score": None,
+        "knowledge_results": knowledge_refs,
+        "knowledge_used": [
+            {"document_id": r["document_id"], "filename": r["filename"]}
+            for r in knowledge_refs
+        ],
+        "knowledge_status": "used" if knowledge_refs else "no_relevant_documents_found",
+        "evidence_used": evidence_used,
+        "information_gaps": grounding.get("information_gaps", []),
+        "unsupported_claims_avoided": grounding.get("unsupported_claims_avoided", []),
+        "grounding_status": "ungrounded",
+        "error": error,
+        "created_at": rfp.created_at.isoformat() if rfp.created_at else None,
+    }
 
 
 def _safe_json_load(value: str | None, default):
