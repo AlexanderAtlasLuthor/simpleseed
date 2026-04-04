@@ -1,0 +1,51 @@
+version: "3.9"
+
+# ── Local production-equivalent environment ───────────────────────────────────
+# Provides a PostgreSQL instance that matches the production DB configuration.
+#
+# Usage:
+#   docker-compose up -d db          # start only the database
+#   docker-compose up -d             # start DB + API together
+#
+# After `docker-compose up -d db`, set in backend/.env:
+#   DATABASE_URL=postgresql+psycopg2://simpleseed:simpleseed@localhost:5432/simpleseed
+# then run: uvicorn main:app --reload
+#
+# The API service requires a Dockerfile (backend/Dockerfile).
+# Until that exists, run the backend manually as shown above.
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: simpleseed
+      POSTGRES_USER: simpleseed
+      POSTGRES_PASSWORD: simpleseed
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U simpleseed -d simpleseed"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # api:
+  #   build:
+  #     context: ./backend
+  #   restart: unless-stopped
+  #   depends_on:
+  #     db:
+  #       condition: service_healthy
+  #   env_file: ./backend/.env
+  #   environment:
+  #     DATABASE_URL: postgresql+psycopg2://simpleseed:simpleseed@db:5432/simpleseed
+  #   ports:
+  #     - "8000:8000"
+  #   volumes:
+  #     - ./backend/knowledge:/app/knowledge
+
+volumes:
+  postgres_data:
