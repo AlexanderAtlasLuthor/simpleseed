@@ -9,6 +9,7 @@ Risks are NEVER invented without evidence. When no API key is available,
 a keyword-based heuristic fallback runs instead.
 """
 import json
+import logging
 import os
 from typing import Optional
 import anthropic
@@ -16,6 +17,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+logger = logging.getLogger(__name__)
 _client = None
 
 # ── Schema constraints ────────────────────────────────────────────────────────
@@ -104,6 +106,7 @@ def identify_risks(
     )
 
     try:
+        logger.debug("LLM call identify_risks model=claude-haiku-4-5-20251001")
         message = _get_client().messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=1500,
@@ -117,9 +120,14 @@ def identify_risks(
 
         result = json.loads(content)
         raw = result.get("risks", [])
-        return [_normalize(r) for r in raw if _is_valid(r)]
+        risks = [_normalize(r) for r in raw if _is_valid(r)]
+        logger.debug("Risk identification completed risks=%d", len(risks))
+        return risks
 
-    except Exception:
+    except Exception as exc:
+        logger.warning(
+            "LLM risk identification failed (%s) — falling back to heuristic risks", exc
+        )
         return _heuristic_risks(req_dict)
 
 

@@ -1,10 +1,12 @@
 import json
+import logging
 import os
 import anthropic
 from dotenv import load_dotenv
 
 load_dotenv()
 
+logger = logging.getLogger(__name__)
 _client = None
 
 # Documents within this limit are sent in a single LLM call.
@@ -40,7 +42,12 @@ def extract_requirements(text: str) -> dict:
     so callers can distinguish complete / partial / ambiguous / failed.
     """
     if len(text) <= _SINGLE_PASS_LIMIT:
+        logger.debug("Extraction strategy=single_pass text_len=%d", len(text))
         return _extract_single(text)
+    logger.debug(
+        "Extraction strategy=chunked text_len=%d (exceeds single-pass limit of %d)",
+        len(text), _SINGLE_PASS_LIMIT,
+    )
     return _extract_chunked(text)
 
 
@@ -119,6 +126,7 @@ Return only valid JSON. No markdown, no extra text."""
 def _extract_single(text: str) -> dict:
     prompt = _EXTRACTION_PROMPT.format(text=text)
 
+    logger.debug("LLM call extract_requirements model=claude-haiku-4-5-20251001")
     message = get_client().messages.create(
         model="claude-haiku-4-5-20251001",
         max_tokens=2500,
@@ -130,9 +138,18 @@ def _extract_single(text: str) -> dict:
     try:
         cleaned = _strip_markdown_fences(content)
         result = json.loads(cleaned)
-        return _enrich_result(result)
+        enriched = _enrich_result(result)
+        logger.debug(
+            "Extraction parse succeeded status=%s confidence=%s "
+            "requirements=%d unclear=%d",
+            enriched.get("extraction_status"), enriched.get("confidence"),
+            len(enriched.get("requirements", [])),
+            len(enriched.get("unclear_requirements", [])),
+        )
+        return enriched
     except Exception:
         # First parse failed — attempt a rescue extraction before giving up.
+        logger.warning("Extraction primary parse failed — attempting rescue extraction")
         return _rescue_extract(text, content)
 
 
@@ -181,6 +198,7 @@ Return only valid JSON. No markdown."""
 
     except Exception:
         # Both passes failed — return an informative failed result, never silent empty.
+        logger.error("Extraction rescue parse also failed — returning status=failed")
         result = _empty_result(summary=failed_content[:300])
         result["extraction_status"] = "failed"
         result["confidence"] = "low"
@@ -197,8 +215,14 @@ Return only valid JSON. No markdown."""
 
 def _extract_chunked(text: str) -> dict:
     chunks = _split_into_chunks(text)
+    logger.debug("Chunked extraction chunks=%d total_text_len=%d", len(chunks), len(text))
     partials = [_extract_single(chunk) for chunk in chunks]
-    return _merge_extractions(partials)
+    merged = _merge_extractions(partials)
+    logger.debug(
+        "Chunked extraction merge completed status=%s requirements=%d",
+        merged.get("extraction_status"), len(merged.get("requirements", [])),
+    )
+    return merged
 
 
 def _split_into_chunks(text: str) -> list[str]:

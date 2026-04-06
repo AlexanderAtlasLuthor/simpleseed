@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 from typing import Optional
 import anthropic
@@ -6,6 +7,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+logger = logging.getLogger(__name__)
 _client = None
 
 
@@ -60,6 +62,7 @@ Return a JSON object with exactly these fields:
 Return only valid JSON. No markdown."""
 
     try:
+        logger.debug("LLM call score_bid model=claude-haiku-4-5-20251001")
         message = get_client().messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=400,
@@ -73,7 +76,10 @@ Return only valid JSON. No markdown."""
             content = content.split("```")[1].split("```")[0].strip()
 
         breakdown = json.loads(content)
-    except Exception:
+    except Exception as exc:
+        logger.warning(
+            "LLM scoring failed (%s) — falling back to heuristic scorer", exc
+        )
         breakdown = _heuristic_score(req_text, ind_ctx)
 
     weighted = (
@@ -84,9 +90,17 @@ Return only valid JSON. No markdown."""
     )
     score = round(weighted)
 
+    decision = "BID" if score >= threshold else "NO BID"
+    logger.debug(
+        "Scoring result score=%d decision=%s threshold=%d "
+        "relevance=%s budget=%s match=%s completeness=%s",
+        score, decision, threshold,
+        breakdown.get("relevance_score"), breakdown.get("budget_fit"),
+        breakdown.get("requirements_match"), breakdown.get("completeness"),
+    )
     return {
         "score": score,
-        "decision": "BID" if score >= threshold else "NO BID",
+        "decision": decision,
         "breakdown": {
             "relevance_score":    breakdown.get("relevance_score",    50),
             "budget_fit":         breakdown.get("budget_fit",         50),

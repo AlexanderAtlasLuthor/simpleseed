@@ -19,9 +19,11 @@ Saving strategy:
   The API endpoint converts this ValueError into a 422 response.
 """
 import json
-import warnings
+import logging
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 CONFIG_PATH = Path(__file__).parent.parent / "scoring_config.json"
 
@@ -119,15 +121,13 @@ def load_scoring_config() -> dict:
         validate_scoring_config(raw)
         return raw
     except FileNotFoundError:
-        warnings.warn(
-            f"scoring_config.json not found at {CONFIG_PATH}; using defaults.",
-            stacklevel=2,
+        logger.warning(
+            "scoring_config.json not found at %s — using built-in defaults", CONFIG_PATH
         )
         return _copy_defaults()
     except (json.JSONDecodeError, ValueError) as exc:
-        warnings.warn(
-            f"scoring_config.json is invalid ({exc}); using defaults.",
-            stacklevel=2,
+        logger.warning(
+            "scoring_config.json is invalid (%s) — using built-in defaults", exc
         )
         return _copy_defaults()
 

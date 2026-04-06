@@ -1,4 +1,7 @@
+import logging
 import pdfplumber
+
+logger = logging.getLogger(__name__)
 
 # Minimum printable characters required to consider primary extraction successful.
 # Below this threshold the PDF is treated as scanned/image-based and OCR is attempted.
@@ -17,12 +20,20 @@ def parse_pdf(file_path: str) -> str:
 
     Returns the best available text, or empty string if both methods fail.
     """
+    logger.debug("PDF parsing started path=%s method=pdfplumber", file_path)
     text = _extract_with_pdfplumber(file_path)
     if len(text.strip()) >= _MIN_TEXT_CHARS:
+        logger.debug("PDF parsed method=pdfplumber text_len=%d", len(text))
         return text
 
     # Fallback: OCR for scanned/image-based PDFs
-    return _extract_with_ocr(file_path)
+    logger.warning(
+        "PDF pdfplumber yielded only %d chars (< %d) — falling back to OCR path=%s",
+        len(text.strip()), _MIN_TEXT_CHARS, file_path,
+    )
+    ocr_text = _extract_with_ocr(file_path)
+    logger.debug("PDF parsed method=ocr text_len=%d", len(ocr_text))
+    return ocr_text
 
 
 # ---------------------------------------------------------------------------

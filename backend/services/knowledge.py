@@ -16,6 +16,7 @@ text/plain       → read directly, UTF-8 with errors replaced
 
 File size limit  → MAX_FILE_BYTES from config (same as RFP upload)
 """
+import logging
 import uuid
 from pathlib import Path
 
@@ -23,6 +24,8 @@ from sqlalchemy.orm import Session
 
 import config as _config
 from models.knowledge_document import KnowledgeDocument
+
+logger = logging.getLogger(__name__)
 
 KNOWLEDGE_DIR = Path(__file__).parent.parent / "knowledge"
 
@@ -50,7 +53,20 @@ def search_knowledge(query: str, top_k: int = 3) -> list[dict]:
             })
 
     results.sort(key=lambda x: x["relevance_score"], reverse=True)
-    return results[:top_k]
+    top = results[:top_k]
+
+    if not top:
+        logger.warning(
+            "KB search returned no results query_words=%d — "
+            "proposal will not be grounded against internal KB",
+            len(query_words),
+        )
+    else:
+        logger.debug(
+            "KB search completed results=%d top_score=%d query_words=%d",
+            len(top), top[0]["relevance_score"], len(query_words),
+        )
+    return top
 
 
 # ── Upload pipeline ───────────────────────────────────────────────────────────
@@ -72,6 +88,11 @@ def upload_document(
     doc_id = "doc_" + uuid.uuid4().hex
     KNOWLEDGE_DIR.mkdir(exist_ok=True)
 
+    logger.info(
+        "KB document upload started filename=%r content_type=%s size_bytes=%d doc_id=%s",
+        filename, content_type, len(file_bytes), doc_id,
+    )
+
     # Create DB record in pending state first so it's visible even if extraction fails
     doc = KnowledgeDocument(
         id               = doc_id,
@@ -92,9 +113,16 @@ def upload_document(
         doc.processing_status = "completed"
         doc.text_length        = len(text)
         doc.error_message      = None
+        logger.info(
+            "KB document processed status=completed doc_id=%s text_len=%d", doc_id, len(text)
+        )
     except Exception as exc:
         doc.processing_status = "error"
         doc.error_message     = str(exc)[:500]
+        logger.error(
+            "KB document processing failed doc_id=%s filename=%r error=%s",
+            doc_id, filename, exc, exc_info=True,
+        )
 
     db.commit()
     db.refresh(doc)

@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 from typing import Optional
 import anthropic
@@ -6,6 +7,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+logger = logging.getLogger(__name__)
 _client = None
 
 
@@ -162,13 +164,30 @@ Be honest — this is used to audit proposal quality.
 
 Write the full proposal now, followed by the grounding JSON:"""
 
+    kb_count = len(knowledge_context) if knowledge_context else 0
+    logger.debug(
+        "LLM call generate_proposal model=claude-haiku-4-5-20251001 kb_docs=%d", kb_count
+    )
+    if not knowledge_context:
+        logger.warning(
+            "Proposal generation: no KB documents available — "
+            "proposal will contain [PLACEHOLDER] markers for unsupported claims"
+        )
+
     message = get_client().messages.create(
         model="claude-haiku-4-5-20251001",
         max_tokens=3500,
         messages=[{"role": "user", "content": prompt}],
     )
 
-    return _parse_grounding_response(message.content[0].text)
+    result = _parse_grounding_response(message.content[0].text)
+    logger.debug(
+        "Proposal generated proposal_len=%d gaps=%d evidence=%d",
+        len(result.get("proposal", "")),
+        len(result.get("information_gaps", [])),
+        len(result.get("evidence_used", [])),
+    )
+    return result
 
 
 # ---------------------------------------------------------------------------

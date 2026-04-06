@@ -1,14 +1,18 @@
 import asyncio
 import json
+import logging
+import time
 import uuid
 from typing import Optional
 from pathlib import Path
 
-from fastapi import Body, Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi import Body, Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel, HttpUrl
 from sqlalchemy.orm import Session
 
+from logging_config import analysis_id_var, request_id_var, setup_logging
 from config import MAX_FILE_BYTES
 from database import get_db, init_db
 from models.rfp import RFP
@@ -25,6 +29,10 @@ from services.sam_gov import get_opportunity_text, search_opportunities
 from services.scoring import score_bid
 from services.scoring_config import load_scoring_config, save_scoring_config, validate_scoring_config
 
+# Configure logging before anything else
+setup_logging()
+logger = logging.getLogger(__name__)
+
 app = FastAPI(title="SimpleSeed API", version="1.0.0")
 
 app.add_middleware(
@@ -34,6 +42,51 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+class _RequestLoggingMiddleware(BaseHTTPMiddleware):
+    """
+    Per-request logging middleware.
+
+    - Generates a short request_id and stores it in request_id_var ContextVar
+      so all log lines for this request carry the same ID.
+    - Logs request start (INFO) and completion (INFO) with duration_ms.
+    - Adds X-Request-ID header to the response for client-side correlation.
+    - Health-check requests (/api/health) are logged at DEBUG to avoid noise.
+    """
+
+    async def dispatch(self, request: Request, call_next):
+        req_id = uuid.uuid4().hex[:8]
+        request_id_var.set(req_id)
+
+        path = request.url.path
+        is_health = path == "/api/health"
+        log_level = logging.DEBUG if is_health else logging.INFO
+
+        logger.log(log_level, "→ %s %s", request.method, path)
+        start = time.perf_counter()
+
+        try:
+            response = await call_next(request)
+        except Exception:
+            elapsed_ms = round((time.perf_counter() - start) * 1000)
+            logger.error(
+                "✗ %s %s unhandled exception duration_ms=%d",
+                request.method, path, elapsed_ms,
+            )
+            raise
+
+        elapsed_ms = round((time.perf_counter() - start) * 1000)
+        logger.log(
+            log_level,
+            "← %s %s status=%d duration_ms=%d",
+            request.method, path, response.status_code, elapsed_ms,
+        )
+        response.headers["X-Request-ID"] = req_id
+        return response
+
+
+app.add_middleware(_RequestLoggingMiddleware)
 
 UPLOAD_DIR = Path(__file__).parent / "files"
 UPLOAD_DIR.mkdir(exist_ok=True)
@@ -84,6 +137,7 @@ class CompanyProfileRequest(BaseModel):
 @app.on_event("startup")
 async def startup():
     init_db()
+    logger.info("SimpleSeed API started (version=1.0.0)")
 
 
 @app.get("/api/health")
@@ -249,6 +303,8 @@ async def analyze_rfp(
     file_id = str(uuid.uuid4())
     file_path = UPLOAD_DIR / f"{file_id}.pdf"
 
+    logger.info("PDF upload received filename=%r industry=%s", file.filename, industry or "auto")
+
     try:
         received = 0
         with open(file_path, "wb") as f:
@@ -264,13 +320,16 @@ async def analyze_rfp(
                     )
                 f.write(chunk)
 
+        logger.debug("PDF saved size_bytes=%d path=%s", received, file_path.name)
         text = parse_pdf(str(file_path))
         if not text.strip():
             raise HTTPException(status_code=400, detail="Could not extract text from PDF.")
+        logger.debug("PDF parsed text_len=%d", len(text))
         return await _run_analysis(text=text, filename=file.filename, industry=industry, db=db)
     except HTTPException:
         raise
     except Exception as e:
+        logger.error("PDF analysis failed filename=%r error=%s", file.filename, e, exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         if file_path.exists():
@@ -455,6 +514,14 @@ async def _run_analysis(
     resolved_industry = resolve_industry(industry)
     rfp_id = str(uuid.uuid4())
 
+    # Set analysis_id ContextVar so all downstream logs carry this ID
+    analysis_id_var.set(rfp_id)
+
+    logger.info(
+        "Analysis started filename=%r industry=%s text_len=%d rfp_id=%s",
+        filename, resolved_industry, len(text), rfp_id,
+    )
+
     rfp = RFP(
         id=rfp_id,
         filename=filename,
@@ -477,6 +544,7 @@ async def _run_analysis(
         db.commit()
         db.refresh(rfp)
     except Exception as e:
+        logger.error("DB record creation failed rfp_id=%s error=%s", rfp_id, e, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Database error on record creation: {e}")
 
     return await _execute_pipeline_steps(
@@ -493,6 +561,9 @@ async def _resume_analysis(rfp: RFP, retry_from: str, db: Session) -> dict:
     Resume a partial_failure pipeline from retry_from, reusing already-committed
     artifacts for all steps that completed before it.
     """
+    # Restore analysis_id context so retry logs are correlated with the original analysis
+    analysis_id_var.set(rfp.id)
+
     if rfp.pipeline_status != "partial_failure":
         raise HTTPException(
             status_code=409,
@@ -510,6 +581,10 @@ async def _resume_analysis(rfp: RFP, retry_from: str, db: Session) -> dict:
 
     start_idx = _PIPELINE_STEPS.index(retry_from)
     completed_steps = list(_safe_json_load(rfp.completed_steps, []))
+    logger.info(
+        "Analysis retry started retry_from=%s reusing_steps=%s rfp_id=%s",
+        retry_from, _PIPELINE_STEPS[:start_idx], rfp.id,
+    )
 
     # Validate that upstream artifacts exist before allowing a mid-pipeline retry
     if start_idx >= 1:
@@ -598,6 +673,8 @@ async def _execute_pipeline_steps(
                 db, rfp, completed_steps, "requirement_extraction",
                 ValueError("No text available for extraction (original_text is empty)."),
             )
+        step_start = time.perf_counter()
+        logger.info("Step requirement_extraction started text_len=%d", len(text_to_extract))
         try:
             requirements = await _llm_with_retry(extract_requirements, text_to_extract)
             risks = identify_risks(requirements, industry=resolved_industry)
@@ -608,17 +685,40 @@ async def _execute_pipeline_steps(
             kb_query = " ".join(kb_query_parts).strip()
             knowledge_results = search_knowledge(kb_query) if kb_query else []
 
+            if not knowledge_results:
+                logger.warning(
+                    "Step requirement_extraction: KB search returned no results "
+                    "kb_query_len=%d — proposal will be RFP-only",
+                    len(kb_query),
+                )
+
             rfp.requirements   = json.dumps(requirements)
             rfp.risks          = json.dumps(risks)
             rfp.knowledge_refs = json.dumps(knowledge_results)
             completed_steps.append("requirement_extraction")
             rfp.completed_steps = json.dumps(completed_steps)
             db.commit()
+
+            logger.info(
+                "Step requirement_extraction completed "
+                "status=%s confidence=%s requirements=%d risks=%d kb_docs=%d duration_ms=%d",
+                requirements.get("extraction_status"), requirements.get("confidence"),
+                len(requirements.get("requirements", [])), len(risks), len(knowledge_results),
+                round((time.perf_counter() - step_start) * 1000),
+            )
         except Exception as exc:
+            logger.error(
+                "Step requirement_extraction failed duration_ms=%d error=%s",
+                round((time.perf_counter() - step_start) * 1000), exc, exc_info=True,
+            )
             return _record_pipeline_failure(db, rfp, completed_steps, "requirement_extraction", exc)
 
     # ── Step 2: proposal generation ──────────────────────────────────────────
     if start_idx <= 1:
+        step_start = time.perf_counter()
+        logger.info(
+            "Step proposal_generation started kb_docs=%d", len(knowledge_results)
+        )
         try:
             proposal_result = await _llm_with_retry(
                 generate_proposal,
@@ -638,11 +738,32 @@ async def _execute_pipeline_steps(
             completed_steps.append("proposal_generation")
             rfp.completed_steps   = json.dumps(completed_steps)
             db.commit()
+
+            info_gaps = grounding_report.get("information_gaps", [])
+            if info_gaps:
+                logger.warning(
+                    "Step proposal_generation: %d information gap(s) detected in proposal",
+                    len(info_gaps),
+                )
+            logger.info(
+                "Step proposal_generation completed "
+                "proposal_len=%d evidence=%d gaps=%d duration_ms=%d",
+                len(proposal_text),
+                len(grounding_report.get("evidence_used", [])),
+                len(info_gaps),
+                round((time.perf_counter() - step_start) * 1000),
+            )
         except Exception as exc:
+            logger.error(
+                "Step proposal_generation failed duration_ms=%d error=%s",
+                round((time.perf_counter() - step_start) * 1000), exc, exc_info=True,
+            )
             return _record_pipeline_failure(db, rfp, completed_steps, "proposal_generation", exc)
 
     # ── Step 3: bid scoring + strategic fit ──────────────────────────────────
     if start_idx <= 2:
+        step_start = time.perf_counter()
+        logger.info("Step bid_scoring started")
         try:
             scoring_cfg   = load_scoring_config()
             sf_weight     = float(scoring_cfg["strategic_fit_weight"])
@@ -661,8 +782,17 @@ async def _execute_pipeline_steps(
                     "decision": "BID" if adjusted >= bid_threshold else "NO BID",
                     "strategic_fit_weight": sf_weight,
                 }
+                logger.debug(
+                    "Score blended raw=%d fit=%d sf_weight=%.2f final=%d",
+                    raw_score["score"], fit_score, sf_weight, adjusted,
+                )
             else:
                 score_result = raw_score
+                if strategic_fit.get("status") == "unknown":
+                    logger.warning(
+                        "Step bid_scoring: strategic fit skipped "
+                        "(company profile not configured) — using raw score only"
+                    )
 
             rfp.score           = score_result["score"]
             rfp.decision        = score_result["decision"]
@@ -674,7 +804,17 @@ async def _execute_pipeline_steps(
             rfp.completed_steps = json.dumps(completed_steps)
             db.commit()
             db.refresh(rfp)
+
+            logger.info(
+                "Step bid_scoring completed score=%d decision=%s duration_ms=%d",
+                score_result["score"], score_result["decision"],
+                round((time.perf_counter() - step_start) * 1000),
+            )
         except Exception as exc:
+            logger.error(
+                "Step bid_scoring failed duration_ms=%d error=%s",
+                round((time.perf_counter() - step_start) * 1000), exc, exc_info=True,
+            )
             return _record_pipeline_failure(db, rfp, completed_steps, "bid_scoring", exc)
 
     # ── All executed steps completed ─────────────────────────────────────────
@@ -688,6 +828,12 @@ async def _execute_pipeline_steps(
         "grounded_with_kb" if any(e.get("source") == "internal_document" for e in evidence_used)
         else "rfp_only" if evidence_used
         else "ungrounded"
+    )
+
+    logger.info(
+        "Analysis completed status=completed score=%d decision=%s grounding=%s rfp_id=%s",
+        score_result.get("score", 0), score_result.get("decision", "?"),
+        grounding_status, rfp.id,
     )
 
     return {
@@ -730,6 +876,10 @@ async def _llm_with_retry(fn, *args, max_retries: int = 1, retry_delay: float = 
         except Exception as exc:
             last_exc = exc
             if attempt < max_retries:
+                logger.warning(
+                    "LLM call failed attempt=%d/%d fn=%s error=%s — retrying in %.1fs",
+                    attempt + 1, max_retries + 1, fn.__name__, exc, retry_delay,
+                )
                 await asyncio.sleep(retry_delay)
     raise last_exc  # type: ignore[misc]
 
@@ -747,6 +897,12 @@ def _record_pipeline_failure(
     the response so the caller receives the maximum useful partial output.
     """
     error = {"type": type(exc).__name__, "message": str(exc)[:500]}
+    logger.error(
+        "Analysis failed status=partial_failure failed_step=%s "
+        "completed_steps=%s error_type=%s error=%s rfp_id=%s",
+        failed_step, completed_steps, type(exc).__name__, str(exc)[:200], rfp.id,
+        exc_info=True,
+    )
     rfp.pipeline_status = "partial_failure"
     rfp.failed_step = failed_step
     rfp.pipeline_error = json.dumps(error)
