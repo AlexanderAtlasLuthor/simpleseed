@@ -4,12 +4,16 @@ python-multipart==0.0.9
 pypdf==4.3.1
 pdfplumber==0.11.9
 anthropic==0.37.1
-sqlalchemy==2.0.35
+sqlalchemy[asyncio]==2.0.35
 python-dotenv==1.0.1
 aiofiles==24.1.0
 requests==2.32.3
 beautifulsoup4==4.12.3
 httpx==0.27.2
+# Async DB drivers — required for production (asyncpg) and dev SQLite (aiosqlite)
+asyncpg>=0.29        # PostgreSQL async driver (production)
+aiosqlite>=0.20      # SQLite async driver (development/test only)
+# psycopg2 kept for Alembic / CLI tooling; NOT used by the app at runtime
 psycopg2-binary>=2.9
 # OCR fallback for scanned PDFs (requires: apt install tesseract-ocr poppler-utils)
 pytesseract==0.3.13

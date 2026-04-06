@@ -28,7 +28,8 @@ import uuid
 from datetime import date
 from typing import Optional
 
-from sqlalchemy.orm import Session
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.feedback import Feedback
 from models.rfp import RFP
@@ -41,8 +42,8 @@ _MIN_CALIBRATION_RECORDS = 3
 
 # ── Write ─────────────────────────────────────────────────────────────────────
 
-def record_feedback(
-    db: Session,
+async def record_feedback(
+    db: AsyncSession,
     rfp_id: str,
     outcome: str,
     result_date: Optional[str],
@@ -74,7 +75,8 @@ def record_feedback(
 
     # Check that the rfp exists (we still allow recording feedback even if it doesn't,
     # but we warn callers via the returned snapshot being empty)
-    rfp: Optional[RFP] = db.query(RFP).filter(RFP.id == rfp_id).first()
+    result = await db.execute(select(RFP).where(RFP.id == rfp_id))
+    rfp: Optional[RFP] = result.scalar_one_or_none()
 
     # Build snapshot from live rfp data
     original_score    = rfp.score    if rfp else None
@@ -110,36 +112,36 @@ def record_feedback(
         risk_summary          = risk_summary_json,
     )
     db.add(fb)
-    db.commit()
-    db.refresh(fb)
+    await db.commit()
+    await db.refresh(fb)
     return fb
 
 
 # ── Read ──────────────────────────────────────────────────────────────────────
 
-def get_feedback_for_rfp(db: Session, rfp_id: str) -> list[dict]:
+async def get_feedback_for_rfp(db: AsyncSession, rfp_id: str) -> list[dict]:
     """Return all feedback records linked to a specific RFP analysis."""
-    rows = (
-        db.query(Feedback)
-        .filter(Feedback.rfp_id == rfp_id)
+    result = await db.execute(
+        select(Feedback)
+        .where(Feedback.rfp_id == rfp_id)
         .order_by(Feedback.created_at.desc())
-        .all()
     )
+    rows = result.scalars().all()
     return [_serialize(fb) for fb in rows]
 
 
-def get_all_feedback(db: Session, limit: int = 200) -> list[dict]:
+async def get_all_feedback(db: AsyncSession, limit: int = 200) -> list[dict]:
     """Return the most recent feedback records across all analyses."""
-    rows = (
-        db.query(Feedback)
+    result = await db.execute(
+        select(Feedback)
         .order_by(Feedback.created_at.desc())
         .limit(limit)
-        .all()
     )
+    rows = result.scalars().all()
     return [_serialize(fb) for fb in rows]
 
 
-def get_feedback_summary(db: Session) -> dict:
+async def get_feedback_summary(db: AsyncSession) -> dict:
     """
     Compute aggregate metrics from all feedback records.
 
@@ -152,7 +154,8 @@ def get_feedback_summary(db: Session) -> dict:
 
     All values are derived from observed data. No interpolation or prediction.
     """
-    rows = db.query(Feedback).all()
+    result = await db.execute(select(Feedback))
+    rows = result.scalars().all()
     total = len(rows)
 
     if total == 0:

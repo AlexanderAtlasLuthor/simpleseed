@@ -10,7 +10,8 @@ from fastapi import Body, Depends, FastAPI, File, Form, HTTPException, Query, Re
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel, HttpUrl
-from sqlalchemy.orm import Session
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from logging_config import analysis_id_var, request_id_var, setup_logging
 from config import MAX_FILE_BYTES
@@ -136,7 +137,7 @@ class CompanyProfileRequest(BaseModel):
 
 @app.on_event("startup")
 async def startup():
-    init_db()
+    await init_db()
     logger.info("SimpleSeed API started (version=1.0.0)")
 
 
@@ -182,11 +183,11 @@ async def update_profile(body: CompanyProfileRequest):
 
 @app.post("/api/rfps/{rfp_id}/feedback")
 async def add_feedback(
-    rfp_id: str, body: FeedbackRequest, db: Session = Depends(get_db)
+    rfp_id: str, body: FeedbackRequest, db: AsyncSession = Depends(get_db)
 ):
     """Record a win/loss/no_bid outcome for a completed analysis."""
     try:
-        fb = record_feedback(
+        fb = await record_feedback(
             db=db,
             rfp_id=rfp_id,
             outcome=body.outcome,
@@ -200,28 +201,28 @@ async def add_feedback(
 
 
 @app.get("/api/rfps/{rfp_id}/feedback")
-async def list_rfp_feedback(rfp_id: str, db: Session = Depends(get_db)):
+async def list_rfp_feedback(rfp_id: str, db: AsyncSession = Depends(get_db)):
     """Return all feedback records for a specific analysis."""
-    return get_feedback_for_rfp(db, rfp_id)
+    return await get_feedback_for_rfp(db, rfp_id)
 
 
 @app.get("/api/feedback/summary")
-async def feedback_summary(db: Session = Depends(get_db)):
+async def feedback_summary(db: AsyncSession = Depends(get_db)):
     """
     Return aggregate win/loss metrics and a threshold calibration insight.
     This is the first concrete use of historical feedback data in the MVP.
     Win rates are computed from observed outcomes only — no prediction or ML.
     """
-    return get_feedback_summary(db)
+    return await get_feedback_summary(db)
 
 
 @app.get("/api/feedback")
 async def list_feedback(
     limit: int = Query(default=200, ge=1, le=1000),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ):
     """Return recent feedback records across all analyses."""
-    return get_all_feedback(db, limit=limit)
+    return await get_all_feedback(db, limit=limit)
 
 
 # ---------------------------------------------------------------------------
@@ -231,7 +232,7 @@ async def list_feedback(
 @app.post("/api/knowledge")
 async def upload_knowledge_document(
     file: UploadFile = File(...),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ):
     """
     Upload a PDF or plain-text file to the internal knowledge base.
@@ -239,7 +240,7 @@ async def upload_knowledge_document(
     """
     file_bytes = await file.read()
     try:
-        doc = upload_document(
+        doc = await upload_document(
             db=db,
             filename=file.filename or "upload",
             content_type=file.content_type or "",
@@ -257,15 +258,15 @@ async def upload_knowledge_document(
 
 
 @app.get("/api/knowledge")
-async def list_knowledge_documents(db: Session = Depends(get_db)):
+async def list_knowledge_documents(db: AsyncSession = Depends(get_db)):
     """List all documents in the knowledge base with their metadata."""
-    return list_documents(db)
+    return await list_documents(db)
 
 
 @app.get("/api/knowledge/{doc_id}")
-async def get_knowledge_document(doc_id: str, db: Session = Depends(get_db)):
+async def get_knowledge_document(doc_id: str, db: AsyncSession = Depends(get_db)):
     """Get metadata for a specific knowledge document."""
-    doc = get_document(db, doc_id)
+    doc = await get_document(db, doc_id)
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
     return doc
@@ -295,7 +296,7 @@ async def update_scoring_config(body: ScoringConfigRequest):
 async def analyze_rfp(
     file: UploadFile = File(...),
     industry: Optional[str] = Form(None),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ):
     if not file.filename or not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are supported")
@@ -337,8 +338,9 @@ async def analyze_rfp(
 
 
 @app.get("/api/rfps")
-async def list_rfps(db: Session = Depends(get_db)):
-    rfps = db.query(RFP).order_by(RFP.created_at.desc()).all()
+async def list_rfps(db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(RFP).order_by(RFP.created_at.desc()))
+    rfps = result.scalars().all()
     return [
         {
             "id": r.id,
@@ -356,8 +358,9 @@ async def list_rfps(db: Session = Depends(get_db)):
 
 
 @app.get("/api/rfps/{rfp_id}")
-async def get_rfp(rfp_id: str, db: Session = Depends(get_db)):
-    rfp = db.query(RFP).filter(RFP.id == rfp_id).first()
+async def get_rfp(rfp_id: str, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(RFP).where(RFP.id == rfp_id))
+    rfp = result.scalar_one_or_none()
     if not rfp:
         raise HTTPException(status_code=404, detail="RFP not found")
 
@@ -408,7 +411,7 @@ class RetryRequest(BaseModel):
 async def retry_rfp_analysis(
     rfp_id: str,
     body: RetryRequest = Body(default_factory=RetryRequest),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ):
     """
     Resume a partial_failure analysis from a specific step without re-uploading
@@ -417,7 +420,8 @@ async def retry_rfp_analysis(
     - retry_from: which step to restart from. Defaults to the step that failed.
       Valid values: "requirement_extraction", "proposal_generation", "bid_scoring"
     """
-    rfp = db.query(RFP).filter(RFP.id == rfp_id).first()
+    result = await db.execute(select(RFP).where(RFP.id == rfp_id))
+    rfp = result.scalar_one_or_none()
     if not rfp:
         raise HTTPException(status_code=404, detail="RFP not found")
 
@@ -432,8 +436,9 @@ async def retry_rfp_analysis(
 
 
 @app.delete("/api/rfps/{rfp_id}")
-async def delete_rfp(rfp_id: str, db: Session = Depends(get_db)):
-    rfp = db.query(RFP).filter(RFP.id == rfp_id).first()
+async def delete_rfp(rfp_id: str, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(RFP).where(RFP.id == rfp_id))
+    rfp = result.scalar_one_or_none()
     if not rfp:
         raise HTTPException(status_code=404, detail="RFP not found")
 
@@ -441,13 +446,13 @@ async def delete_rfp(rfp_id: str, db: Session = Depends(get_db)):
     if file_path.exists():
         file_path.unlink()
 
-    db.delete(rfp)
-    db.commit()
+    await db.delete(rfp)
+    await db.commit()
     return {"message": "Deleted"}
 
 
 @app.post("/api/analyze-url")
-async def analyze_url(body: AnalyzeURLRequest, db: Session = Depends(get_db)):
+async def analyze_url(body: AnalyzeURLRequest, db: AsyncSession = Depends(get_db)):
     url_str = str(body.url)
     try:
         text, source_name = await fetch_url_text(url_str)
@@ -481,7 +486,7 @@ async def sam_search(
 async def sam_analyze(
     notice_id: str,
     body: SAMAnalyzeRequest = Body(default=SAMAnalyzeRequest()),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ):
     try:
         text, title = await get_opportunity_text(notice_id)
@@ -502,7 +507,7 @@ _PIPELINE_STEPS = ["requirement_extraction", "proposal_generation", "bid_scoring
 
 
 async def _run_analysis(
-    text: str, filename: str, db: Session, industry: Optional[str] = None
+    text: str, filename: str, db: AsyncSession, industry: Optional[str] = None
 ) -> dict:
     """
     Start a new analysis from scratch.
@@ -541,8 +546,8 @@ async def _run_analysis(
     )
     try:
         db.add(rfp)
-        db.commit()
-        db.refresh(rfp)
+        await db.commit()
+        await db.refresh(rfp)
     except Exception as e:
         logger.error("DB record creation failed rfp_id=%s error=%s", rfp_id, e, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Database error on record creation: {e}")
@@ -556,7 +561,7 @@ async def _run_analysis(
     )
 
 
-async def _resume_analysis(rfp: RFP, retry_from: str, db: Session) -> dict:
+async def _resume_analysis(rfp: RFP, retry_from: str, db: AsyncSession) -> dict:
     """
     Resume a partial_failure pipeline from retry_from, reusing already-committed
     artifacts for all steps that completed before it.
@@ -628,7 +633,7 @@ async def _resume_analysis(rfp: RFP, retry_from: str, db: Session) -> dict:
     rfp.failed_step     = None
     rfp.pipeline_error  = None
     rfp.completed_steps = json.dumps(completed_steps)
-    db.commit()
+    await db.commit()
 
     result = await _execute_pipeline_steps(
         rfp=rfp, db=db, start_idx=start_idx,
@@ -646,7 +651,7 @@ async def _resume_analysis(rfp: RFP, retry_from: str, db: Session) -> dict:
 
 async def _execute_pipeline_steps(
     rfp: RFP,
-    db: Session,
+    db: AsyncSession,
     start_idx: int,
     completed_steps: list,
     requirements: dict,
@@ -697,7 +702,7 @@ async def _execute_pipeline_steps(
             rfp.knowledge_refs = json.dumps(knowledge_results)
             completed_steps.append("requirement_extraction")
             rfp.completed_steps = json.dumps(completed_steps)
-            db.commit()
+            await db.commit()
 
             logger.info(
                 "Step requirement_extraction completed "
@@ -711,7 +716,7 @@ async def _execute_pipeline_steps(
                 "Step requirement_extraction failed duration_ms=%d error=%s",
                 round((time.perf_counter() - step_start) * 1000), exc, exc_info=True,
             )
-            return _record_pipeline_failure(db, rfp, completed_steps, "requirement_extraction", exc)
+            return await _record_pipeline_failure(db, rfp, completed_steps, "requirement_extraction", exc)
 
     # ── Step 2: proposal generation ──────────────────────────────────────────
     if start_idx <= 1:
@@ -737,7 +742,7 @@ async def _execute_pipeline_steps(
             rfp.grounding_report  = json.dumps(grounding_report)
             completed_steps.append("proposal_generation")
             rfp.completed_steps   = json.dumps(completed_steps)
-            db.commit()
+            await db.commit()
 
             info_gaps = grounding_report.get("information_gaps", [])
             if info_gaps:
@@ -758,7 +763,7 @@ async def _execute_pipeline_steps(
                 "Step proposal_generation failed duration_ms=%d error=%s",
                 round((time.perf_counter() - step_start) * 1000), exc, exc_info=True,
             )
-            return _record_pipeline_failure(db, rfp, completed_steps, "proposal_generation", exc)
+            return await _record_pipeline_failure(db, rfp, completed_steps, "proposal_generation", exc)
 
     # ── Step 3: bid scoring + strategic fit ──────────────────────────────────
     if start_idx <= 2:
@@ -802,8 +807,8 @@ async def _execute_pipeline_steps(
             completed_steps.append("bid_scoring")
             rfp.pipeline_status = "completed"
             rfp.completed_steps = json.dumps(completed_steps)
-            db.commit()
-            db.refresh(rfp)
+            await db.commit()
+            await db.refresh(rfp)
 
             logger.info(
                 "Step bid_scoring completed score=%d decision=%s duration_ms=%d",
@@ -815,7 +820,7 @@ async def _execute_pipeline_steps(
                 "Step bid_scoring failed duration_ms=%d error=%s",
                 round((time.perf_counter() - step_start) * 1000), exc, exc_info=True,
             )
-            return _record_pipeline_failure(db, rfp, completed_steps, "bid_scoring", exc)
+            return await _record_pipeline_failure(db, rfp, completed_steps, "bid_scoring", exc)
 
     # ── All executed steps completed ─────────────────────────────────────────
     knowledge_used = [
@@ -884,8 +889,8 @@ async def _llm_with_retry(fn, *args, max_retries: int = 1, retry_delay: float = 
     raise last_exc  # type: ignore[misc]
 
 
-def _record_pipeline_failure(
-    db: Session,
+async def _record_pipeline_failure(
+    db: AsyncSession,
     rfp: RFP,
     completed_steps: list[str],
     failed_step: str,
@@ -908,7 +913,7 @@ def _record_pipeline_failure(
     rfp.pipeline_error = json.dumps(error)
     rfp.completed_steps = json.dumps(completed_steps)
     try:
-        db.commit()
+        await db.commit()
     except Exception:
         pass  # best-effort — don't shadow the original error
 

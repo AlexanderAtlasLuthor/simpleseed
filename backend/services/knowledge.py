@@ -4,7 +4,7 @@ Knowledge base service.
 Storage layout
 --------------
 Text content  : backend/knowledge/{document_id}.txt
-Metadata      : knowledge_documents table in SQLite
+Metadata      : knowledge_documents table in SQLite/PostgreSQL
 
 This split lets search_knowledge() keep its simple file-scan approach
 while the API exposes rich metadata (filename, status, upload date, etc.).
@@ -20,7 +20,8 @@ import logging
 import uuid
 from pathlib import Path
 
-from sqlalchemy.orm import Session
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 import config as _config
 from models.knowledge_document import KnowledgeDocument
@@ -71,8 +72,8 @@ def search_knowledge(query: str, top_k: int = 3) -> list[dict]:
 
 # ── Upload pipeline ───────────────────────────────────────────────────────────
 
-def upload_document(
-    db: Session,
+async def upload_document(
+    db: AsyncSession,
     filename: str,
     content_type: str,
     file_bytes: bytes,
@@ -102,7 +103,7 @@ def upload_document(
         processing_status = "pending",
     )
     db.add(doc)
-    db.commit()
+    await db.commit()
 
     # Extract text
     try:
@@ -124,23 +125,25 @@ def upload_document(
             doc_id, filename, exc, exc_info=True,
         )
 
-    db.commit()
-    db.refresh(doc)
+    await db.commit()
+    await db.refresh(doc)
     return doc
 
 
-def list_documents(db: Session) -> list[dict]:
+async def list_documents(db: AsyncSession) -> list[dict]:
     """Return all knowledge documents ordered by upload date, newest first."""
-    rows = (
-        db.query(KnowledgeDocument)
-        .order_by(KnowledgeDocument.uploaded_at.desc())
-        .all()
+    result = await db.execute(
+        select(KnowledgeDocument).order_by(KnowledgeDocument.uploaded_at.desc())
     )
+    rows = result.scalars().all()
     return [_serialize(r) for r in rows]
 
 
-def get_document(db: Session, doc_id: str) -> dict | None:
-    row = db.query(KnowledgeDocument).filter(KnowledgeDocument.id == doc_id).first()
+async def get_document(db: AsyncSession, doc_id: str) -> dict | None:
+    result = await db.execute(
+        select(KnowledgeDocument).where(KnowledgeDocument.id == doc_id)
+    )
+    row = result.scalar_one_or_none()
     return _serialize(row) if row else None
 
 
