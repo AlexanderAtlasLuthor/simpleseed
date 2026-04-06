@@ -14,6 +14,7 @@ import os
 from typing import Optional
 import anthropic
 from dotenv import load_dotenv
+from settings import llm_model
 
 load_dotenv()
 
@@ -106,9 +107,9 @@ def identify_risks(
     )
 
     try:
-        logger.debug("LLM call identify_risks model=claude-haiku-4-5-20251001")
+        logger.debug("LLM call identify_risks model=%s", llm_model)
         message = _get_client().messages.create(
-            model="claude-haiku-4-5-20251001",
+            model=llm_model,
             max_tokens=1500,
             messages=[{"role": "user", "content": prompt}],
         )

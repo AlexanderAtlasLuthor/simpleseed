@@ -4,6 +4,7 @@ import os
 from typing import Optional
 import anthropic
 from dotenv import load_dotenv
+from settings import llm_model
 
 load_dotenv()
 
@@ -62,9 +63,9 @@ Return a JSON object with exactly these fields:
 Return only valid JSON. No markdown."""
 
     try:
-        logger.debug("LLM call score_bid model=claude-haiku-4-5-20251001")
+        logger.debug("LLM call score_bid model=%s", llm_model)
         message = get_client().messages.create(
-            model="claude-haiku-4-5-20251001",
+            model=llm_model,
             max_tokens=400,
             messages=[{"role": "user", "content": prompt}],
         )

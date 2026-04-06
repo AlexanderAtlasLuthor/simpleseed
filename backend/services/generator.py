@@ -4,6 +4,7 @@ import os
 from typing import Optional
 import anthropic
 from dotenv import load_dotenv
+from settings import llm_model
 
 load_dotenv()
 
@@ -166,7 +167,7 @@ Write the full proposal now, followed by the grounding JSON:"""
 
     kb_count = len(knowledge_context) if knowledge_context else 0
     logger.debug(
-        "LLM call generate_proposal model=claude-haiku-4-5-20251001 kb_docs=%d", kb_count
+        "LLM call generate_proposal model=%s kb_docs=%d", llm_model, kb_count
     )
     if not knowledge_context:
         logger.warning(
@@ -175,7 +176,7 @@ Write the full proposal now, followed by the grounding JSON:"""
         )
 
     message = get_client().messages.create(
-        model="claude-haiku-4-5-20251001",
+        model=llm_model,
         max_tokens=3500,
         messages=[{"role": "user", "content": prompt}],
     )

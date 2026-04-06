@@ -3,6 +3,7 @@ import logging
 import os
 import anthropic
 from dotenv import load_dotenv
+from settings import llm_model
 
 load_dotenv()
 
@@ -126,9 +127,9 @@ Return only valid JSON. No markdown, no extra text."""
 def _extract_single(text: str) -> dict:
     prompt = _EXTRACTION_PROMPT.format(text=text)
 
-    logger.debug("LLM call extract_requirements model=claude-haiku-4-5-20251001")
+    logger.debug("LLM call extract_requirements model=%s", llm_model)
     message = get_client().messages.create(
-        model="claude-haiku-4-5-20251001",
+        model=llm_model,
         max_tokens=2500,
         messages=[{"role": "user", "content": prompt}],
     )
@@ -181,7 +182,7 @@ Return only valid JSON. No markdown."""
 
     try:
         message = get_client().messages.create(
-            model="claude-haiku-4-5-20251001",
+            model=llm_model,
             max_tokens=800,
             messages=[{"role": "user", "content": rescue_prompt}],
         )

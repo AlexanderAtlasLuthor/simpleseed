@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Optional
 import anthropic
 from dotenv import load_dotenv
+from settings import llm_model
 
 load_dotenv()
 
@@ -184,7 +185,7 @@ def _evaluate_with_llm(req_text: str, profile: dict) -> dict:
     )
 
     message = _client.messages.create(
-        model="claude-haiku-4-5-20251001",
+        model=llm_model,
         max_tokens=1200,
         messages=[{"role": "user", "content": prompt}],
     )
