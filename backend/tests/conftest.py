@@ -96,7 +96,10 @@ async def http_client(db_engine):
 
     app.dependency_overrides[get_db] = _override_get_db
 
-    with patch("main.init_db", new=AsyncMock()):
+    # Also patch main.SessionLocal so background tasks (_pipeline_background,
+    # _pipeline_resume_background) use the same in-memory test engine.
+    with patch("main.init_db", new=AsyncMock()), \
+         patch("main.SessionLocal", new=factory):
         async with AsyncClient(
             transport=ASGITransport(app=app), base_url="http://test"
         ) as client:

@@ -6,7 +6,7 @@ import uuid
 from typing import Optional
 from pathlib import Path
 
-from fastapi import Body, Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi import BackgroundTasks, Body, Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel, HttpUrl
@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from logging_config import analysis_id_var, request_id_var, setup_logging
 from config import MAX_FILE_BYTES
-from database import get_db, init_db
+from database import SessionLocal, get_db, init_db
 from models.rfp import RFP
 from services.extractor import extract_requirements
 from services.feedback import get_all_feedback, get_feedback_for_rfp, get_feedback_summary, record_feedback
@@ -296,6 +296,7 @@ async def update_scoring_config(body: ScoringConfigRequest):
 async def analyze_rfp(
     file: UploadFile = File(...),
     industry: Optional[str] = Form(None),
+    background_tasks: BackgroundTasks = BackgroundTasks(),
     db: AsyncSession = Depends(get_db),
 ):
     if not file.filename or not file.filename.lower().endswith(".pdf"):
@@ -326,7 +327,10 @@ async def analyze_rfp(
         if not text.strip():
             raise HTTPException(status_code=400, detail="Could not extract text from PDF.")
         logger.debug("PDF parsed text_len=%d", len(text))
-        return await _run_analysis(text=text, filename=file.filename, industry=industry, db=db)
+        return await _run_analysis(
+            text=text, filename=file.filename, industry=industry,
+            db=db, background_tasks=background_tasks,
+        )
     except HTTPException:
         raise
     except Exception as e:
@@ -411,6 +415,7 @@ class RetryRequest(BaseModel):
 async def retry_rfp_analysis(
     rfp_id: str,
     body: RetryRequest = Body(default_factory=RetryRequest),
+    background_tasks: BackgroundTasks = BackgroundTasks(),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -432,7 +437,9 @@ async def retry_rfp_analysis(
             detail="No failed_step on record and no retry_from specified in request body.",
         )
 
-    return await _resume_analysis(rfp=rfp, retry_from=retry_from, db=db)
+    return await _resume_analysis(
+        rfp=rfp, retry_from=retry_from, db=db, background_tasks=background_tasks
+    )
 
 
 @app.delete("/api/rfps/{rfp_id}")
@@ -452,7 +459,11 @@ async def delete_rfp(rfp_id: str, db: AsyncSession = Depends(get_db)):
 
 
 @app.post("/api/analyze-url")
-async def analyze_url(body: AnalyzeURLRequest, db: AsyncSession = Depends(get_db)):
+async def analyze_url(
+    body: AnalyzeURLRequest,
+    background_tasks: BackgroundTasks = BackgroundTasks(),
+    db: AsyncSession = Depends(get_db),
+):
     url_str = str(body.url)
     try:
         text, source_name = await fetch_url_text(url_str)
@@ -461,7 +472,10 @@ async def analyze_url(body: AnalyzeURLRequest, db: AsyncSession = Depends(get_db
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch URL: {e}")
 
-    return await _run_analysis(text=text, filename=source_name, industry=body.industry, db=db)
+    return await _run_analysis(
+        text=text, filename=source_name, industry=body.industry,
+        db=db, background_tasks=background_tasks,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -486,6 +500,7 @@ async def sam_search(
 async def sam_analyze(
     notice_id: str,
     body: SAMAnalyzeRequest = Body(default=SAMAnalyzeRequest()),
+    background_tasks: BackgroundTasks = BackgroundTasks(),
     db: AsyncSession = Depends(get_db),
 ):
     try:
@@ -494,7 +509,8 @@ async def sam_analyze(
         raise HTTPException(status_code=400, detail=str(e))
 
     return await _run_analysis(
-        text=text, filename=f"SAM.gov — {title}", industry=body.industry, db=db
+        text=text, filename=f"SAM.gov — {title}", industry=body.industry,
+        db=db, background_tasks=background_tasks,
     )
 
 
@@ -507,11 +523,16 @@ _PIPELINE_STEPS = ["requirement_extraction", "proposal_generation", "bid_scoring
 
 
 async def _run_analysis(
-    text: str, filename: str, db: AsyncSession, industry: Optional[str] = None
+    text: str,
+    filename: str,
+    db: AsyncSession,
+    background_tasks: BackgroundTasks,
+    industry: Optional[str] = None,
 ) -> dict:
     """
     Start a new analysis from scratch.
-    Creates the RFP record immediately, then delegates to _execute_pipeline_steps.
+    Creates the RFP record immediately and returns — pipeline runs in the background.
+    Clients should poll GET /api/rfps/{id} and read pipeline_status / completed_steps.
     """
     if not text.strip():
         raise HTTPException(status_code=400, detail="No text content could be extracted.")
@@ -523,7 +544,7 @@ async def _run_analysis(
     analysis_id_var.set(rfp_id)
 
     logger.info(
-        "Analysis started filename=%r industry=%s text_len=%d rfp_id=%s",
+        "Analysis queued filename=%r industry=%s text_len=%d rfp_id=%s",
         filename, resolved_industry, len(text), rfp_id,
     )
 
@@ -552,16 +573,13 @@ async def _run_analysis(
         logger.error("DB record creation failed rfp_id=%s error=%s", rfp_id, e, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Database error on record creation: {e}")
 
-    return await _execute_pipeline_steps(
-        rfp=rfp, db=db, start_idx=0,
-        completed_steps=[],
-        requirements={}, risks=[], knowledge_results=[],
-        proposal_text="", grounding_report={},
-        full_text=text,     # use full document text for initial extraction
-    )
+    background_tasks.add_task(_pipeline_background, rfp_id, text, resolved_industry)
+    return {"id": rfp_id, "status": "processing", "filename": filename}
 
 
-async def _resume_analysis(rfp: RFP, retry_from: str, db: AsyncSession) -> dict:
+async def _resume_analysis(
+    rfp: RFP, retry_from: str, db: AsyncSession, background_tasks: BackgroundTasks
+) -> dict:
     """
     Resume a partial_failure pipeline from retry_from, reusing already-committed
     artifacts for all steps that completed before it.
@@ -635,18 +653,76 @@ async def _resume_analysis(rfp: RFP, retry_from: str, db: AsyncSession) -> dict:
     rfp.completed_steps = json.dumps(completed_steps)
     await db.commit()
 
-    result = await _execute_pipeline_steps(
-        rfp=rfp, db=db, start_idx=start_idx,
-        completed_steps=completed_steps,
-        requirements=requirements, risks=risks, knowledge_results=knowledge_results,
-        proposal_text=proposal_text, grounding_report=grounding_report,
+    background_tasks.add_task(
+        _pipeline_resume_background,
+        rfp.id, start_idx, list(completed_steps),
+        requirements, risks, knowledge_results,
+        proposal_text, grounding_report,
     )
+    return {
+        "id":           rfp.id,
+        "status":       "processing",
+        "retried_from": retry_from,
+        "reused_steps": reused_steps,
+        "rerun_steps":  rerun_steps,
+    }
 
-    # Attach retry metadata to the response
-    result["retried_from"] = retry_from
-    result["reused_steps"] = reused_steps
-    result["rerun_steps"]  = rerun_steps
-    return result
+
+async def _pipeline_background(rfp_id: str, text: str, industry: str) -> None:
+    """Run the full analysis pipeline in a background task (own DB session)."""
+    analysis_id_var.set(rfp_id)
+    logger.info("Background pipeline starting rfp_id=%s", rfp_id)
+    try:
+        async with SessionLocal() as db:
+            result = await db.execute(select(RFP).where(RFP.id == rfp_id))
+            rfp = result.scalar_one_or_none()
+            if rfp is None:
+                logger.error("Background pipeline: RFP not found rfp_id=%s", rfp_id)
+                return
+            await _execute_pipeline_steps(
+                rfp=rfp, db=db, start_idx=0,
+                completed_steps=[],
+                requirements={}, risks=[], knowledge_results=[],
+                proposal_text="", grounding_report={},
+                full_text=text,
+            )
+    except Exception as exc:
+        logger.error(
+            "Background pipeline crashed rfp_id=%s error=%s", rfp_id, exc, exc_info=True
+        )
+
+
+async def _pipeline_resume_background(
+    rfp_id: str,
+    start_idx: int,
+    completed_steps: list,
+    requirements: dict,
+    risks: list,
+    knowledge_results: list,
+    proposal_text: str,
+    grounding_report: dict,
+) -> None:
+    """Resume a partial_failure pipeline in a background task (own DB session)."""
+    analysis_id_var.set(rfp_id)
+    logger.info("Background pipeline resume starting rfp_id=%s start_idx=%d", rfp_id, start_idx)
+    try:
+        async with SessionLocal() as db:
+            result = await db.execute(select(RFP).where(RFP.id == rfp_id))
+            rfp = result.scalar_one_or_none()
+            if rfp is None:
+                logger.error("Background resume: RFP not found rfp_id=%s", rfp_id)
+                return
+            await _execute_pipeline_steps(
+                rfp=rfp, db=db, start_idx=start_idx,
+                completed_steps=completed_steps,
+                requirements=requirements, risks=risks,
+                knowledge_results=knowledge_results,
+                proposal_text=proposal_text, grounding_report=grounding_report,
+            )
+    except Exception as exc:
+        logger.error(
+            "Background pipeline resume crashed rfp_id=%s error=%s", rfp_id, exc, exc_info=True
+        )
 
 
 async def _execute_pipeline_steps(
