@@ -131,6 +131,7 @@ def _extract_single(text: str) -> dict:
     message = get_client().messages.create(
         model=llm_model,
         max_tokens=2500,
+        temperature=0,
         messages=[{"role": "user", "content": prompt}],
     )
 
@@ -184,6 +185,7 @@ Return only valid JSON. No markdown."""
         message = get_client().messages.create(
             model=llm_model,
             max_tokens=800,
+            temperature=0,
             messages=[{"role": "user", "content": rescue_prompt}],
         )
         cleaned = _strip_markdown_fences(message.content[0].text)

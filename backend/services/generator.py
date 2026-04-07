@@ -178,6 +178,7 @@ Write the full proposal now, followed by the grounding JSON:"""
     message = get_client().messages.create(
         model=llm_model,
         max_tokens=3500,
+        temperature=0,
         messages=[{"role": "user", "content": prompt}],
     )
 

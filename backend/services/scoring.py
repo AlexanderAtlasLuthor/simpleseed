@@ -67,6 +67,7 @@ Return only valid JSON. No markdown."""
         message = get_client().messages.create(
             model=llm_model,
             max_tokens=400,
+            temperature=0,
             messages=[{"role": "user", "content": prompt}],
         )
 

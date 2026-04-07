@@ -111,6 +111,7 @@ def identify_risks(
         message = _get_client().messages.create(
             model=llm_model,
             max_tokens=1500,
+            temperature=0,
             messages=[{"role": "user", "content": prompt}],
         )
         content = message.content[0].text

@@ -187,6 +187,7 @@ def _evaluate_with_llm(req_text: str, profile: dict) -> dict:
     message = _client.messages.create(
         model=llm_model,
         max_tokens=1200,
+        temperature=0,
         messages=[{"role": "user", "content": prompt}],
     )
     content = message.content[0].text
