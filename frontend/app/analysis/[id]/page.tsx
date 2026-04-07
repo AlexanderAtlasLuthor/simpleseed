@@ -238,7 +238,21 @@ export default function AnalysisPage() {
             <h1 className="text-2xl font-bold text-[#e8f5eb] truncate max-w-lg">{data.filename}</h1>
             <p className="text-sm text-[#6b8f72] mt-1">{date}</p>
           </div>
-          <div className="flex items-center gap-2 shrink-0">
+          <div className="flex items-center gap-2 shrink-0 flex-wrap justify-end">
+            <a
+              href={`/api/rfps/${data.id}/export/pdf`}
+              download
+              className="px-3 py-1.5 rounded-lg text-xs font-medium border border-[#1e3022] bg-[#0d1610] text-[#6b8f72] hover:text-seed-400 hover:border-seed-800 transition-colors"
+            >
+              ↓ PDF
+            </a>
+            <a
+              href={`/api/rfps/${data.id}/export/docx`}
+              download
+              className="px-3 py-1.5 rounded-lg text-xs font-medium border border-[#1e3022] bg-[#0d1610] text-[#6b8f72] hover:text-seed-400 hover:border-seed-800 transition-colors"
+            >
+              ↓ Word
+            </a>
             <span className={`px-3 py-1.5 rounded-full text-sm font-semibold ${
               data.score.decision === "BID"
                 ? "bg-seed-900/50 text-seed-400 border border-seed-800"

@@ -8,6 +8,7 @@ from pathlib import Path
 
 from fastapi import BackgroundTasks, Body, Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 from starlette.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel, HttpUrl
 from sqlalchemy import select
@@ -405,6 +406,38 @@ async def get_rfp(rfp_id: str, db: AsyncSession = Depends(get_db)):
         "error": _safe_json_load(rfp.pipeline_error, None),
         "created_at": rfp.created_at.isoformat(),
     }
+
+
+@app.get("/api/rfps/{rfp_id}/export/docx")
+async def export_rfp_docx(rfp_id: str, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(RFP).where(RFP.id == rfp_id))
+    rfp = result.scalar_one_or_none()
+    if not rfp:
+        raise HTTPException(status_code=404, detail="RFP not found")
+    from services.export import build_docx
+    content = build_docx(rfp)
+    stem = rfp.filename.rsplit(".", 1)[0]
+    return Response(
+        content=content,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": f'attachment; filename="{stem}.docx"'},
+    )
+
+
+@app.get("/api/rfps/{rfp_id}/export/pdf")
+async def export_rfp_pdf(rfp_id: str, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(RFP).where(RFP.id == rfp_id))
+    rfp = result.scalar_one_or_none()
+    if not rfp:
+        raise HTTPException(status_code=404, detail="RFP not found")
+    from services.export import build_pdf
+    content = build_pdf(rfp)
+    stem = rfp.filename.rsplit(".", 1)[0]
+    return Response(
+        content=content,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{stem}.pdf"'},
+    )
 
 
 class RetryRequest(BaseModel):
