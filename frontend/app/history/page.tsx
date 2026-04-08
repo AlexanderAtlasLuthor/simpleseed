@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useState } from "react";
 import RFPCard from "../components/RFPCard";
+import { apiFetch } from "../../lib/api";
 
 interface RFPSummary {
   id: string;
@@ -16,7 +17,7 @@ export default function HistoryPage() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    fetch("/api/rfps")
+    apiFetch("/api/rfps")
       .then((r) => r.json())
       .then(setRfps)
       .finally(() => setLoading(false));
@@ -24,7 +25,7 @@ export default function HistoryPage() {
 
   const handleDelete = async (id: string) => {
     if (!confirm("Delete this RFP analysis?")) return;
-    await fetch(`/api/rfps/${id}`, { method: "DELETE" });
+    await apiFetch(`/api/rfps/${id}`, { method: "DELETE" });
     setRfps((prev) => prev.filter((r) => r.id !== id));
   };
 

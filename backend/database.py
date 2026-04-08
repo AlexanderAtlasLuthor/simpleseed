@@ -58,6 +58,7 @@ def init_db() -> None:
     from models.rfp import RFP                              # noqa: F401
     from models.feedback import Feedback                    # noqa: F401
     from models.knowledge_document import KnowledgeDocument # noqa: F401
+    from models.user import User                            # noqa: F401  ← auth
     Base.metadata.create_all(bind=engine)
     _migrate()
 
@@ -94,6 +95,25 @@ def _get_existing_columns(conn, table_name: str) -> set:
     return {row[0] for row in rows}
 
 
+def _table_exists(conn, table_name: str) -> bool:
+    """Return True if table_name exists in the database."""
+    dialect = conn.dialect.name
+    if dialect == "sqlite":
+        rows = conn.execute(
+            text("SELECT name FROM sqlite_master WHERE type='table' AND name=:t"),
+            {"t": table_name},
+        )
+        return rows.fetchone() is not None
+    rows = conn.execute(
+        text(
+            "SELECT table_name FROM information_schema.tables "
+            "WHERE table_schema = 'public' AND table_name = :t"
+        ),
+        {"t": table_name},
+    )
+    return rows.fetchone() is not None
+
+
 def _migrate() -> None:
     """
     Add columns introduced after the initial schema without dropping data.
@@ -108,23 +128,26 @@ def _migrate() -> None:
     For production-grade schema evolution use Alembic.
     """
     with engine.connect() as conn:
-        existing = _get_existing_columns(conn, "rfps")
+        # ── rfps table ────────────────────────────────────────────────────────
+        if _table_exists(conn, "rfps"):
+            existing_rfp = _get_existing_columns(conn, "rfps")
 
-        # Map column_name → SQL column definition (type + default)
-        new_columns: dict[str, str] = {
-            "industry":         "TEXT DEFAULT 'general'",
-            "risks":            "TEXT DEFAULT '[]'",
-            "strategic_fit":    "TEXT DEFAULT '{}'",
-            "knowledge_refs":   "TEXT DEFAULT '[]'",
-            "grounding_report": "TEXT DEFAULT '{}'",
-            "pipeline_status":  "TEXT DEFAULT 'completed'",
-            "failed_step":      "TEXT",
-            "completed_steps":  "TEXT DEFAULT '[]'",
-            "pipeline_error":   "TEXT",
-        }
+            rfp_columns: dict[str, str] = {
+                "industry":         "TEXT DEFAULT 'general'",
+                "risks":            "TEXT DEFAULT '[]'",
+                "strategic_fit":    "TEXT DEFAULT '{}'",
+                "knowledge_refs":   "TEXT DEFAULT '[]'",
+                "grounding_report": "TEXT DEFAULT '{}'",
+                "pipeline_status":  "TEXT DEFAULT 'completed'",
+                "failed_step":      "TEXT",
+                "completed_steps":  "TEXT DEFAULT '[]'",
+                "pipeline_error":   "TEXT",
+                # user_id is nullable so pre-auth records are preserved
+                "user_id":          "TEXT",
+            }
 
-        for col, definition in new_columns.items():
-            if col not in existing:
-                conn.execute(text(f"ALTER TABLE rfps ADD COLUMN {col} {definition}"))
+            for col, definition in rfp_columns.items():
+                if col not in existing_rfp:
+                    conn.execute(text(f"ALTER TABLE rfps ADD COLUMN {col} {definition}"))
 
         conn.commit()

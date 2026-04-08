@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
+import { apiFetch } from "../../lib/api";
 
 interface KnowledgeDoc {
   document_id: string;
@@ -29,7 +30,7 @@ export default function KnowledgePage() {
   const fetchDocs = async () => {
     setLoading(true);
     try {
-      const res = await fetch("/api/knowledge");
+      const res = await apiFetch("/api/knowledge");
       if (res.ok) setDocs(await res.json());
     } finally {
       setLoading(false);
@@ -53,7 +54,7 @@ export default function KnowledgePage() {
     formData.append("file", file);
 
     try {
-      const res  = await fetch("/api/knowledge", { method: "POST", body: formData });
+      const res  = await apiFetch("/api/knowledge", { method: "POST", body: formData });
       const data = await res.json();
       if (!res.ok) {
         setError(data.detail || "Upload failed.");

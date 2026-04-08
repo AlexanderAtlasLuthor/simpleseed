@@ -4,6 +4,7 @@ import { useParams, useRouter } from "next/navigation";
 import ScoreCard from "../../components/ScoreCard";
 import RequirementsView from "../../components/RequirementsView";
 import ProposalView from "../../components/ProposalView";
+import { apiFetch } from "../../../lib/api";
 
 type Tab = "requirements" | "proposal" | "score";
 
@@ -30,7 +31,7 @@ export default function AnalysisPage() {
   const [activeTab, setActiveTab] = useState<Tab>("score");
 
   useEffect(() => {
-    fetch(`/api/rfps/${id}`)
+    apiFetch(`/api/rfps/${id}`)
       .then((r) => {
         if (!r.ok) throw new Error("Not found");
         return r.json();

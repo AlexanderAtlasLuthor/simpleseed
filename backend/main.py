@@ -4,14 +4,17 @@ import uuid
 from typing import Optional
 from pathlib import Path
 
-from fastapi import Body, Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi import Body, Depends, FastAPI, File, Form, HTTPException, Query, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, HttpUrl
+from pydantic import BaseModel, EmailStr, HttpUrl
 from sqlalchemy.orm import Session
 
+from auth_deps import get_current_user
 from config import MAX_FILE_BYTES
 from database import get_db, init_db
 from models.rfp import RFP
+from models.user import User
+from services.auth import create_access_token, hash_password, verify_password
 from services.extractor import extract_requirements
 from services.feedback import get_all_feedback, get_feedback_for_rfp, get_feedback_summary, record_feedback
 from services.knowledge import get_document, list_documents, search_knowledge, upload_document
@@ -81,9 +84,93 @@ class CompanyProfileRequest(BaseModel):
     capacity_constraints: list[str] = []
 
 
+class RegisterRequest(BaseModel):
+    email: EmailStr
+    password: str
+
+
+class LoginRequest(BaseModel):
+    email: EmailStr
+    password: str
+
+
 @app.on_event("startup")
 async def startup():
     init_db()
+
+
+# ---------------------------------------------------------------------------
+# Auth endpoints  (public — no get_current_user dependency)
+# ---------------------------------------------------------------------------
+
+@app.post("/api/auth/register", status_code=201)
+async def register(body: RegisterRequest, db: Session = Depends(get_db)):
+    """
+    Create a new user account.
+
+    Returns HTTP 409 if the email is already registered.
+    Password must be at least 8 characters.
+    """
+    if len(body.password) < 8:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Password must be at least 8 characters.",
+        )
+
+    existing = db.query(User).filter(User.email == body.email).first()
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="An account with that email already exists.",
+        )
+
+    user = User(
+        id=str(uuid.uuid4()),
+        email=body.email,
+        hashed_password=hash_password(body.password),
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+
+    token = create_access_token(user_id=user.id, email=user.email)
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "user": {"id": user.id, "email": user.email},
+    }
+
+
+@app.post("/api/auth/login")
+async def login(body: LoginRequest, db: Session = Depends(get_db)):
+    """
+    Authenticate with email + password.  Returns a signed JWT on success.
+
+    Returns HTTP 401 for any invalid credential to avoid leaking whether
+    an email is registered.
+    """
+    user = db.query(User).filter(User.email == body.email).first()
+
+    # Use verify_password even on a dummy hash to prevent timing attacks.
+    if user is None or not verify_password(body.password, user.hashed_password):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect email or password.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    token = create_access_token(user_id=user.id, email=user.email)
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "user": {"id": user.id, "email": user.email},
+    }
+
+
+@app.get("/api/auth/me")
+async def me(current_user: User = Depends(get_current_user)):
+    """Return the currently authenticated user's basic profile."""
+    return {"id": current_user.id, "email": current_user.email}
 
 
 @app.get("/api/health")
@@ -92,7 +179,7 @@ async def health():
 
 
 @app.get("/api/industries")
-async def list_industries():
+async def list_industries(current_user: User = Depends(get_current_user)):
     """Return all supported industry identifiers."""
     from services.industry import INDUSTRY_CONTEXT, DEFAULT_INDUSTRY
     return {
@@ -105,7 +192,7 @@ async def list_industries():
 
 
 @app.get("/api/profile")
-async def get_profile():
+async def get_profile(current_user: User = Depends(get_current_user)):
     """Return the current company profile. Returns null values when not configured."""
     from services.profile import PROFILE_PATH
     import json as _json
@@ -120,7 +207,10 @@ async def get_profile():
 
 
 @app.put("/api/profile")
-async def update_profile(body: CompanyProfileRequest):
+async def update_profile(
+    body: CompanyProfileRequest,
+    current_user: User = Depends(get_current_user),
+):
     """Save the company profile. Set company_name to enable strategic fit evaluation."""
     saved = save_profile(body.model_dump())
     return {"configured": bool(saved.get("company_name")), "profile": saved}
@@ -128,9 +218,14 @@ async def update_profile(body: CompanyProfileRequest):
 
 @app.post("/api/rfps/{rfp_id}/feedback")
 async def add_feedback(
-    rfp_id: str, body: FeedbackRequest, db: Session = Depends(get_db)
+    rfp_id: str,
+    body: FeedbackRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
     """Record a win/loss/no_bid outcome for a completed analysis."""
+    # Verify ownership before allowing mutation.
+    _get_owned_rfp(rfp_id, current_user, db)
     try:
         fb = record_feedback(
             db=db,
@@ -146,13 +241,21 @@ async def add_feedback(
 
 
 @app.get("/api/rfps/{rfp_id}/feedback")
-async def list_rfp_feedback(rfp_id: str, db: Session = Depends(get_db)):
+async def list_rfp_feedback(
+    rfp_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     """Return all feedback records for a specific analysis."""
+    _get_owned_rfp(rfp_id, current_user, db)
     return get_feedback_for_rfp(db, rfp_id)
 
 
 @app.get("/api/feedback/summary")
-async def feedback_summary(db: Session = Depends(get_db)):
+async def feedback_summary(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     """
     Return aggregate win/loss metrics and a threshold calibration insight.
     This is the first concrete use of historical feedback data in the MVP.
@@ -164,6 +267,7 @@ async def feedback_summary(db: Session = Depends(get_db)):
 @app.get("/api/feedback")
 async def list_feedback(
     limit: int = Query(default=200, ge=1, le=1000),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """Return recent feedback records across all analyses."""
@@ -177,6 +281,7 @@ async def list_feedback(
 @app.post("/api/knowledge")
 async def upload_knowledge_document(
     file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """
@@ -203,13 +308,20 @@ async def upload_knowledge_document(
 
 
 @app.get("/api/knowledge")
-async def list_knowledge_documents(db: Session = Depends(get_db)):
+async def list_knowledge_documents(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     """List all documents in the knowledge base with their metadata."""
     return list_documents(db)
 
 
 @app.get("/api/knowledge/{doc_id}")
-async def get_knowledge_document(doc_id: str, db: Session = Depends(get_db)):
+async def get_knowledge_document(
+    doc_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     """Get metadata for a specific knowledge document."""
     doc = get_document(db, doc_id)
     if not doc:
@@ -218,13 +330,16 @@ async def get_knowledge_document(doc_id: str, db: Session = Depends(get_db)):
 
 
 @app.get("/api/scoring-config")
-async def get_scoring_config():
+async def get_scoring_config(current_user: User = Depends(get_current_user)):
     """Return the active scoring configuration (weights, threshold, strategic_fit_weight)."""
     return load_scoring_config()
 
 
 @app.put("/api/scoring-config")
-async def update_scoring_config(body: ScoringConfigRequest):
+async def update_scoring_config(
+    body: ScoringConfigRequest,
+    current_user: User = Depends(get_current_user),
+):
     """
     Save a new scoring configuration.
     Returns 422 if weights don't sum to 1.0, values are out of range, or fields are missing.
@@ -241,6 +356,7 @@ async def update_scoring_config(body: ScoringConfigRequest):
 async def analyze_rfp(
     file: UploadFile = File(...),
     industry: Optional[str] = Form(None),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     if not file.filename or not file.filename.lower().endswith(".pdf"):
@@ -267,7 +383,10 @@ async def analyze_rfp(
         text = parse_pdf(str(file_path))
         if not text.strip():
             raise HTTPException(status_code=400, detail="Could not extract text from PDF.")
-        return await _run_analysis(text=text, filename=file.filename, industry=industry, db=db)
+        return await _run_analysis(
+            text=text, filename=file.filename, industry=industry,
+            db=db, user_id=current_user.id,
+        )
     except HTTPException:
         raise
     except Exception as e:
@@ -278,8 +397,17 @@ async def analyze_rfp(
 
 
 @app.get("/api/rfps")
-async def list_rfps(db: Session = Depends(get_db)):
-    rfps = db.query(RFP).order_by(RFP.created_at.desc()).all()
+async def list_rfps(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    # Only return RFPs owned by the current user.
+    rfps = (
+        db.query(RFP)
+        .filter(RFP.user_id == current_user.id)
+        .order_by(RFP.created_at.desc())
+        .all()
+    )
     return [
         {
             "id": r.id,
@@ -297,10 +425,13 @@ async def list_rfps(db: Session = Depends(get_db)):
 
 
 @app.get("/api/rfps/{rfp_id}")
-async def get_rfp(rfp_id: str, db: Session = Depends(get_db)):
-    rfp = db.query(RFP).filter(RFP.id == rfp_id).first()
-    if not rfp:
-        raise HTTPException(status_code=404, detail="RFP not found")
+async def get_rfp(
+    rfp_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    # Return 404 for both "not found" and "wrong owner" to avoid leaking existence.
+    rfp = _get_owned_rfp(rfp_id, current_user, db)
 
     knowledge_refs = _safe_json_load(rfp.knowledge_refs, [])
     grounding = _safe_json_load(rfp.grounding_report, {})
@@ -349,6 +480,7 @@ class RetryRequest(BaseModel):
 async def retry_rfp_analysis(
     rfp_id: str,
     body: RetryRequest = Body(default_factory=RetryRequest),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """
@@ -358,9 +490,7 @@ async def retry_rfp_analysis(
     - retry_from: which step to restart from. Defaults to the step that failed.
       Valid values: "requirement_extraction", "proposal_generation", "bid_scoring"
     """
-    rfp = db.query(RFP).filter(RFP.id == rfp_id).first()
-    if not rfp:
-        raise HTTPException(status_code=404, detail="RFP not found")
+    rfp = _get_owned_rfp(rfp_id, current_user, db)
 
     retry_from = body.retry_from or rfp.failed_step
     if not retry_from:
@@ -373,10 +503,12 @@ async def retry_rfp_analysis(
 
 
 @app.delete("/api/rfps/{rfp_id}")
-async def delete_rfp(rfp_id: str, db: Session = Depends(get_db)):
-    rfp = db.query(RFP).filter(RFP.id == rfp_id).first()
-    if not rfp:
-        raise HTTPException(status_code=404, detail="RFP not found")
+async def delete_rfp(
+    rfp_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    rfp = _get_owned_rfp(rfp_id, current_user, db)
 
     file_path = UPLOAD_DIR / f"{rfp_id}.pdf"
     if file_path.exists():
@@ -388,7 +520,11 @@ async def delete_rfp(rfp_id: str, db: Session = Depends(get_db)):
 
 
 @app.post("/api/analyze-url")
-async def analyze_url(body: AnalyzeURLRequest, db: Session = Depends(get_db)):
+async def analyze_url(
+    body: AnalyzeURLRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     url_str = str(body.url)
     try:
         text, source_name = await fetch_url_text(url_str)
@@ -397,7 +533,10 @@ async def analyze_url(body: AnalyzeURLRequest, db: Session = Depends(get_db)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch URL: {e}")
 
-    return await _run_analysis(text=text, filename=source_name, industry=body.industry, db=db)
+    return await _run_analysis(
+        text=text, filename=source_name, industry=body.industry,
+        db=db, user_id=current_user.id,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -410,6 +549,7 @@ async def sam_search(
     naics: str = Query("", description="NAICS code filter"),
     limit: int = Query(10, ge=1, le=25),
     offset: int = Query(0, ge=0),
+    current_user: User = Depends(get_current_user),
 ):
     try:
         result = await search_opportunities(keywords=q, naics_code=naics, limit=limit, offset=offset)
@@ -422,6 +562,7 @@ async def sam_search(
 async def sam_analyze(
     notice_id: str,
     body: SAMAnalyzeRequest = Body(default=SAMAnalyzeRequest()),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     try:
@@ -430,8 +571,30 @@ async def sam_analyze(
         raise HTTPException(status_code=400, detail=str(e))
 
     return await _run_analysis(
-        text=text, filename=f"SAM.gov — {title}", industry=body.industry, db=db
+        text=text, filename=f"SAM.gov — {title}", industry=body.industry,
+        db=db, user_id=current_user.id,
     )
+
+
+# ---------------------------------------------------------------------------
+# Ownership helper
+# ---------------------------------------------------------------------------
+
+def _get_owned_rfp(rfp_id: str, current_user: User, db: Session) -> RFP:
+    """
+    Load an RFP by ID that belongs to current_user.
+
+    Returns 404 (not 403) for both "not found" and "wrong owner" cases to
+    avoid leaking whether a given rfp_id exists for another user.
+    """
+    rfp = (
+        db.query(RFP)
+        .filter(RFP.id == rfp_id, RFP.user_id == current_user.id)
+        .first()
+    )
+    if not rfp:
+        raise HTTPException(status_code=404, detail="RFP not found")
+    return rfp
 
 
 # ---------------------------------------------------------------------------
@@ -443,11 +606,17 @@ _PIPELINE_STEPS = ["requirement_extraction", "proposal_generation", "bid_scoring
 
 
 async def _run_analysis(
-    text: str, filename: str, db: Session, industry: Optional[str] = None
+    text: str,
+    filename: str,
+    db: Session,
+    industry: Optional[str] = None,
+    user_id: Optional[str] = None,
 ) -> dict:
     """
     Start a new analysis from scratch.
     Creates the RFP record immediately, then delegates to _execute_pipeline_steps.
+    user_id must be supplied by all authenticated callers; records without it
+    are considered orphaned and will not be returned to any user.
     """
     if not text.strip():
         raise HTTPException(status_code=400, detail="No text content could be extracted.")
@@ -457,6 +626,7 @@ async def _run_analysis(
 
     rfp = RFP(
         id=rfp_id,
+        user_id=user_id,       # ← link to owning user
         filename=filename,
         original_text=text[:12000],
         industry=resolved_industry,

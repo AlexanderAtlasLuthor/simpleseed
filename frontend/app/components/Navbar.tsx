@@ -1,9 +1,11 @@
 "use client";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useSession, signOut } from "next-auth/react";
 
 export default function Navbar() {
   const pathname = usePathname();
+  const { data: session } = useSession();
 
   const linkClass = (href: string) =>
     `text-sm font-medium transition-colors ${
@@ -31,6 +33,21 @@ export default function Navbar() {
           <Link href="/knowledge" className={linkClass("/knowledge")}>
             Knowledge
           </Link>
+
+          {/* User info + sign-out — only shown when authenticated */}
+          {session?.user && (
+            <div className="flex items-center gap-3 border-l border-[#1e2d22] pl-6">
+              <span className="text-xs text-[#6b8f72] hidden sm:block truncate max-w-[160px]">
+                {session.user.email}
+              </span>
+              <button
+                onClick={() => signOut({ callbackUrl: "/login" })}
+                className="text-xs text-[#6b8f72] hover:text-red-400 transition-colors"
+              >
+                Sign out
+              </button>
+            </div>
+          )}
         </div>
       </div>
     </nav>

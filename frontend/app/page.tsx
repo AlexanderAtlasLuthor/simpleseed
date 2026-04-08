@@ -3,6 +3,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import UploadZone from "./components/UploadZone";
 import SAMResults from "./components/SAMResults";
+import { apiFetch } from "../lib/api";
 
 interface SAMOpportunity {
   noticeId: string;
@@ -51,7 +52,7 @@ export default function Home() {
     if (industry) formData.append("industry", industry);
 
     try {
-      const res = await fetch("/api/analyze", { method: "POST", body: formData });
+      const res = await apiFetch("/api/analyze", { method: "POST", body: formData });
       if (!res.ok) throw new Error((await res.json()).detail || "Analysis failed");
       handleResult(await res.json());
     } catch (e) {
@@ -67,7 +68,7 @@ export default function Home() {
     setSamResults(null);
 
     try {
-      const res = await fetch("/api/analyze-url", {
+      const res = await apiFetch("/api/analyze-url", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ url, industry: industry || null }),
@@ -90,7 +91,7 @@ export default function Home() {
       const params = new URLSearchParams({ q: query, limit: "10" });
       if (naics) params.set("naics", naics);
 
-      const res = await fetch(`/api/sam/search?${params}`);
+      const res = await apiFetch(`/api/sam/search?${params}`);
       if (!res.ok) throw new Error((await res.json()).detail || "Search failed");
 
       const data = await res.json();
@@ -109,7 +110,7 @@ export default function Home() {
     setError(null);
 
     try {
-      const res = await fetch(`/api/sam/analyze/${noticeId}`, {
+      const res = await apiFetch(`/api/sam/analyze/${noticeId}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ industry: industry || null }),

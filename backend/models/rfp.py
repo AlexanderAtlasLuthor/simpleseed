@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Integer, Text, DateTime
+from sqlalchemy import Column, ForeignKey, String, Integer, Text, DateTime
 from sqlalchemy.sql import func
 from database import Base
 
@@ -7,6 +7,8 @@ class RFP(Base):
     __tablename__ = "rfps"
 
     id = Column(String, primary_key=True)
+    # owner — nullable so pre-auth records are preserved and not surfaced to any user
+    user_id = Column(String, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
     filename = Column(String, nullable=False)
     original_text = Column(Text)
     requirements = Column(Text)
