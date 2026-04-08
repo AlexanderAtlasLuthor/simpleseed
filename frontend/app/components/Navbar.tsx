@@ -1,73 +1,74 @@
 "use client";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { LogoMark, SettingsIcon, UserIcon, ClockIcon, DatabaseIcon, ChartBarIcon, FileTextIcon } from "./Icons";
 
-const NAV_LINKS = [
-  { href: "/analyze",  label: "Analyze"  },
-  { href: "/history",  label: "History"  },
-  { href: "/knowledge",label: "Knowledge"},
-  { href: "/metrics",  label: "Metrics"  },
+const NAV = [
+  { href: "/analyze",  label: "Analyze",   Icon: FileTextIcon  },
+  { href: "/history",  label: "History",   Icon: ClockIcon     },
+  { href: "/knowledge",label: "Knowledge", Icon: DatabaseIcon  },
+  { href: "/metrics",  label: "Metrics",   Icon: ChartBarIcon  },
 ];
 
 export default function Navbar() {
   const pathname = usePathname();
 
-  const linkClass = (href: string) =>
-    `text-sm font-medium transition-colors ${
-      pathname === href || pathname.startsWith(href + "/")
-        ? "text-seed-400"
-        : "text-[#6b8f72] hover:text-[#e8f5eb]"
-    }`;
+  const active = (href: string) =>
+    pathname === href || pathname.startsWith(href + "/");
 
   return (
-    <nav className="border-b border-[#1e2d22] bg-[#0a0f0d]/80 backdrop-blur sticky top-0 z-50">
-      <div className="max-w-6xl mx-auto px-6 h-14 flex items-center justify-between">
+    <nav className="border-b border-[#27272a] bg-[#09090b]/90 backdrop-blur sticky top-0 z-50">
+      <div className="max-w-6xl mx-auto px-6 h-14 flex items-center justify-between gap-8">
+
         {/* Logo */}
-        <Link href="/" className="flex items-center gap-2 shrink-0">
-          <span className="text-seed-500 text-xl">🌱</span>
-          <span className="font-semibold text-[#e8f5eb] tracking-tight">SimpleSeed</span>
+        <Link href="/" className="flex items-center gap-2.5 shrink-0">
+          <LogoMark className="h-7 w-7" />
+          <span className="font-semibold text-[#fafafa] tracking-tight text-sm">
+            SimpleSeed
+          </span>
         </Link>
 
-        {/* Main nav */}
-        <div className="flex items-center gap-6">
-          {NAV_LINKS.map(({ href, label }) => (
-            <Link key={href} href={href} className={linkClass(href)}>
+        {/* Main links */}
+        <div className="flex items-center gap-1">
+          {NAV.map(({ href, label, Icon }) => (
+            <Link
+              key={href}
+              href={href}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
+                active(href)
+                  ? "bg-[#18181b] text-[#fafafa]"
+                  : "text-[#71717a] hover:text-[#fafafa] hover:bg-[#18181b]"
+              }`}
+            >
+              <Icon className="h-3.5 w-3.5" />
               {label}
             </Link>
           ))}
         </div>
 
-        {/* Right side */}
-        <div className="flex items-center gap-3">
+        {/* Right — Settings + Profile */}
+        <div className="flex items-center gap-1 shrink-0">
           <Link
             href="/settings"
-            className={`p-2 rounded-lg transition-colors ${
-              pathname === "/settings"
-                ? "text-seed-400 bg-seed-900/30"
-                : "text-[#6b8f72] hover:text-[#e8f5eb] hover:bg-[#111a14]"
-            }`}
             title="Settings"
+            className={`p-2 rounded-lg transition-colors ${
+              active("/settings")
+                ? "bg-[#18181b] text-[#fafafa]"
+                : "text-[#71717a] hover:text-[#fafafa] hover:bg-[#18181b]"
+            }`}
           >
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75}
-                d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75}
-                d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-            </svg>
+            <SettingsIcon className="h-4 w-4" />
           </Link>
           <Link
             href="/profile"
-            className={`p-2 rounded-lg transition-colors ${
-              pathname === "/profile"
-                ? "text-seed-400 bg-seed-900/30"
-                : "text-[#6b8f72] hover:text-[#e8f5eb] hover:bg-[#111a14]"
-            }`}
             title="Profile"
+            className={`p-2 rounded-lg transition-colors ${
+              active("/profile")
+                ? "bg-[#18181b] text-[#fafafa]"
+                : "text-[#71717a] hover:text-[#fafafa] hover:bg-[#18181b]"
+            }`}
           >
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75}
-                d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
-            </svg>
+            <UserIcon className="h-4 w-4" />
           </Link>
         </div>
       </div>

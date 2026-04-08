@@ -17,37 +17,35 @@ interface SAMOpportunity {
 }
 
 const INDUSTRIES = [
-  { id: "",                       label: "General (neutral)"        },
-  { id: "technology",             label: "Technology"               },
-  { id: "consulting",             label: "Consulting"               },
-  { id: "healthcare",             label: "Healthcare"               },
-  { id: "construction",           label: "Construction"             },
-  { id: "government_contracting", label: "Government Contracting"   },
-  { id: "education",              label: "Education"                },
+  { id: "",                       label: "General (neutral)"       },
+  { id: "technology",             label: "Technology"              },
+  { id: "consulting",             label: "Consulting"              },
+  { id: "healthcare",             label: "Healthcare"              },
+  { id: "construction",           label: "Construction"            },
+  { id: "government_contracting", label: "Government Contracting"  },
+  { id: "education",              label: "Education"               },
 ];
 
 export default function AnalyzePage() {
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [industry, setIndustry] = useState<string>("");
-  const [samResults, setSamResults] = useState<SAMOpportunity[] | null>(null);
-  const [samTotal, setSamTotal] = useState(0);
-  const [analyzingNoticeId, setAnalyzingNoticeId] = useState<string | null>(null);
-
+  const [loading, setLoading]               = useState(false);
+  const [error, setError]                   = useState<string | null>(null);
+  const [industry, setIndustry]             = useState<string>("");
+  const [samResults, setSamResults]         = useState<SAMOpportunity[] | null>(null);
+  const [samTotal, setSamTotal]             = useState(0);
+  const [analyzingId, setAnalyzingId]       = useState<string | null>(null);
   const router = useRouter();
+
   const handleResult = (data: { id: string }) => router.push(`/analysis/${data.id}`);
 
   const handleAnalyzePDF = async (file: File) => {
-    setLoading(true);
-    setError(null);
-    setSamResults(null);
-    const formData = new FormData();
-    formData.append("file", file);
-    if (industry) formData.append("industry", industry);
+    setLoading(true); setError(null); setSamResults(null);
+    const fd = new FormData();
+    fd.append("file", file);
+    if (industry) fd.append("industry", industry);
     try {
-      const res = await fetch("/api/analyze", { method: "POST", body: formData });
-      if (!res.ok) throw new Error((await res.json()).detail || "Analysis failed");
-      handleResult(await res.json());
+      const r = await fetch("/api/analyze", { method: "POST", body: fd });
+      if (!r.ok) throw new Error((await r.json()).detail || "Analysis failed");
+      handleResult(await r.json());
     } catch (e) {
       setError(e instanceof Error ? e.message : "Something went wrong");
       setLoading(false);
@@ -55,17 +53,15 @@ export default function AnalyzePage() {
   };
 
   const handleAnalyzeURL = async (url: string) => {
-    setLoading(true);
-    setError(null);
-    setSamResults(null);
+    setLoading(true); setError(null); setSamResults(null);
     try {
-      const res = await fetch("/api/analyze-url", {
+      const r = await fetch("/api/analyze-url", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ url, industry: industry || null }),
       });
-      if (!res.ok) throw new Error((await res.json()).detail || "Analysis failed");
-      handleResult(await res.json());
+      if (!r.ok) throw new Error((await r.json()).detail || "Analysis failed");
+      handleResult(await r.json());
     } catch (e) {
       setError(e instanceof Error ? e.message : "Something went wrong");
       setLoading(false);
@@ -73,74 +69,63 @@ export default function AnalyzePage() {
   };
 
   const handleSAMSearch = async (query: string, naics: string) => {
-    setLoading(true);
-    setError(null);
-    setSamResults(null);
+    setLoading(true); setError(null); setSamResults(null);
     try {
       const params = new URLSearchParams({ q: query, limit: "10" });
       if (naics) params.set("naics", naics);
-      const res = await fetch(`/api/sam/search?${params}`);
-      if (!res.ok) throw new Error((await res.json()).detail || "Search failed");
-      const data = await res.json();
+      const r = await fetch(`/api/sam/search?${params}`);
+      if (!r.ok) throw new Error((await r.json()).detail || "Search failed");
+      const data = await r.json();
       setSamResults(data.opportunities);
       setSamTotal(data.totalRecords);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Something went wrong");
-    } finally {
-      setLoading(false);
-    }
+    } finally { setLoading(false); }
   };
 
   const handleSAMAnalyze = async (noticeId: string) => {
-    setAnalyzingNoticeId(noticeId);
-    setError(null);
+    setAnalyzingId(noticeId); setError(null);
     try {
-      const res = await fetch(`/api/sam/analyze/${noticeId}`, {
+      const r = await fetch(`/api/sam/analyze/${noticeId}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ industry: industry || null }),
       });
-      if (!res.ok) throw new Error((await res.json()).detail || "Analysis failed");
-      handleResult(await res.json());
+      if (!r.ok) throw new Error((await r.json()).detail || "Analysis failed");
+      handleResult(await r.json());
     } catch (e) {
       setError(e instanceof Error ? e.message : "Something went wrong");
-      setAnalyzingNoticeId(null);
+      setAnalyzingId(null);
     }
   };
 
   return (
-    <div className="max-w-6xl mx-auto px-6 py-16">
+    <div className="max-w-5xl mx-auto px-6 py-14">
       {/* Header */}
-      <div className="text-center mb-14">
-        <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full border border-seed-800/60 bg-seed-900/20 text-seed-400 text-xs font-medium mb-6">
-          <span className="w-1.5 h-1.5 rounded-full bg-seed-500 animate-pulse" />
-          Powered by Claude AI
-        </div>
-        <h1 className="text-5xl font-bold text-[#e8f5eb] tracking-tight mb-4">
+      <div className="text-center mb-12">
+        <h1 className="text-3xl font-bold text-[#fafafa] tracking-tight mb-3">
           Analyze an RFP
         </h1>
-        <p className="text-lg text-[#6b8f72] max-w-xl mx-auto leading-relaxed">
-          Upload a PDF, paste a link, or search SAM.gov — get instant AI analysis,
-          bid scoring, and a ready-to-customize proposal.
+        <p className="text-[#71717a] max-w-md mx-auto text-sm leading-relaxed">
+          Upload a PDF, paste a URL, or search SAM.gov federal opportunities.
+          Results are ready in under a minute.
         </p>
       </div>
 
-      {/* Industry selector */}
-      <div className="max-w-xl mx-auto mb-4">
-        <label className="block text-xs text-[#6b8f72] mb-2">Your industry</label>
+      {/* Industry */}
+      <div className="max-w-xl mx-auto mb-5">
+        <label className="block text-xs text-[#71717a] mb-1.5 font-medium">Industry</label>
         <select
           value={industry}
           onChange={(e) => setIndustry(e.target.value)}
-          className="w-full bg-[#0a0f0d] border border-[#1e2d22] rounded-xl px-4 py-2.5 text-sm text-[#e8f5eb] focus:outline-none focus:border-seed-700 transition-colors appearance-none cursor-pointer"
+          className="w-full bg-[#111113] border border-[#27272a] rounded-xl px-4 py-2.5 text-sm text-[#fafafa] focus:outline-none focus:border-seed-700 transition-colors appearance-none cursor-pointer"
         >
           {INDUSTRIES.map((ind) => (
-            <option key={ind.id} value={ind.id} className="bg-[#0a0f0d]">
-              {ind.label}
-            </option>
+            <option key={ind.id} value={ind.id} className="bg-[#111113]">{ind.label}</option>
           ))}
         </select>
-        <p className="mt-1.5 text-xs text-[#3d5c44]">
-          Proposals and scoring adapt to the selected industry context.
+        <p className="mt-1.5 text-xs text-[#52525b]">
+          Scoring and proposals adapt to the selected industry context.
         </p>
       </div>
 
@@ -163,26 +148,8 @@ export default function AnalyzePage() {
             opportunities={samResults}
             total={samTotal}
             onAnalyze={handleSAMAnalyze}
-            analyzing={analyzingNoticeId}
+            analyzing={analyzingId}
           />
-        </div>
-      )}
-
-      {samResults === null && (
-        <div className="mt-24 grid grid-cols-1 md:grid-cols-4 gap-6 max-w-4xl mx-auto">
-          {[
-            { step: "01", icon: "📄", title: "Upload RFP",  desc: "PDF, URL, or SAM.gov search" },
-            { step: "02", icon: "🔍", title: "Extract",     desc: "AI pulls requirements, deadlines, budget" },
-            { step: "03", icon: "📊", title: "Score",       desc: "Bid/no-bid decision with reasoning" },
-            { step: "04", icon: "✍️", title: "Propose",     desc: "Draft proposal ready to customize" },
-          ].map(({ step, icon, title, desc }) => (
-            <div key={step} className="text-center">
-              <div className="text-3xl mb-3">{icon}</div>
-              <div className="text-xs font-mono text-seed-600 mb-1">{step}</div>
-              <div className="font-semibold text-[#e8f5eb] text-sm mb-1">{title}</div>
-              <div className="text-xs text-[#6b8f72]">{desc}</div>
-            </div>
-          ))}
         </div>
       )}
     </div>

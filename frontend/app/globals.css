@@ -5,12 +5,15 @@
 @import url("https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap");
 
 :root {
-  --bg: #0a0f0d;
-  --surface: #111a14;
-  --border: #1e2d22;
-  --text: #e8f5eb;
-  --muted: #6b8f72;
-  --accent: #22c55e;
+  --bg:       #09090b;
+  --surface:  #111113;
+  --surface2: #18181b;
+  --border:   #27272a;
+  --border2:  #3f3f46;
+  --text:     #fafafa;
+  --muted:    #71717a;
+  --subtle:   #52525b;
+  --accent:   #3b82f6;
 }
 
 * {
@@ -22,44 +25,29 @@ body {
   color: var(--text);
   font-family: "Inter", system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
 /* Scrollbar */
-::-webkit-scrollbar {
-  width: 6px;
-}
-::-webkit-scrollbar-track {
-  background: var(--bg);
-}
-::-webkit-scrollbar-thumb {
-  background: var(--border);
-  border-radius: 3px;
-}
-::-webkit-scrollbar-thumb:hover {
-  background: var(--muted);
-}
+::-webkit-scrollbar       { width: 5px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: var(--border2); }
 
-/* Prose-like text areas */
+/* Proposal prose */
 .prose-dark {
-  line-height: 1.7;
-  color: #d1fae5;
+  line-height: 1.75;
+  color: #e4e4e7;
 }
 .prose-dark h1,
 .prose-dark h2,
 .prose-dark h3 {
-  color: #86efac;
+  color: #f4f4f5;
   font-weight: 600;
   margin-top: 1.5em;
   margin-bottom: 0.5em;
 }
-.prose-dark p {
-  margin-bottom: 0.75em;
-}
+.prose-dark p   { margin-bottom: 0.75em; }
 .prose-dark ul,
-.prose-dark ol {
-  padding-left: 1.5em;
-  margin-bottom: 0.75em;
-}
-.prose-dark li {
-  margin-bottom: 0.25em;
-}
+.prose-dark ol  { padding-left: 1.5em; margin-bottom: 0.75em; }
+.prose-dark li  { margin-bottom: 0.25em; }
