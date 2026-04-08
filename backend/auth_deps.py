@@ -19,8 +19,8 @@ from models.user import User
 from services.auth import decode_access_token
 
 # HTTPBearer extracts the token from the "Authorization: Bearer <token>" header.
-# auto_error=True means FastAPI automatically returns 403 (not 401) when the
-# header is missing; we keep that as the standard "no credentials" response.
+# auto_error=True means FastAPI raises an HTTPException when the header is
+# missing or malformed (behavior may vary by FastAPI version: 401 or 403).
 _bearer = HTTPBearer(auto_error=True)
 
 

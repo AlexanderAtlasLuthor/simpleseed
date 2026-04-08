@@ -14,7 +14,7 @@ from config import MAX_FILE_BYTES
 from database import get_db, init_db
 from models.rfp import RFP
 from models.user import User
-from services.auth import create_access_token, hash_password, verify_password
+from services.auth import DUMMY_BCRYPT_HASH, create_access_token, hash_password, verify_password
 from services.extractor import extract_requirements
 from services.feedback import get_all_feedback, get_feedback_for_rfp, get_feedback_summary, record_feedback
 from services.knowledge import get_document, list_documents, search_knowledge, upload_document
@@ -96,6 +96,13 @@ class LoginRequest(BaseModel):
 
 @app.on_event("startup")
 async def startup():
+    import os, warnings
+    if os.getenv("JWT_SECRET_KEY", "").startswith("CHANGE_ME") or not os.getenv("JWT_SECRET_KEY"):
+        warnings.warn(
+            "JWT_SECRET_KEY is unset or uses the insecure development default. "
+            "Set a strong random secret before deploying to production.",
+            stacklevel=1,
+        )
     init_db()
 
 
@@ -117,7 +124,8 @@ async def register(body: RegisterRequest, db: Session = Depends(get_db)):
             detail="Password must be at least 8 characters.",
         )
 
-    existing = db.query(User).filter(User.email == body.email).first()
+    normalized_email = body.email.lower()
+    existing = db.query(User).filter(User.email == normalized_email).first()
     if existing:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -126,7 +134,7 @@ async def register(body: RegisterRequest, db: Session = Depends(get_db)):
 
     user = User(
         id=str(uuid.uuid4()),
-        email=body.email,
+        email=normalized_email,
         hashed_password=hash_password(body.password),
     )
     db.add(user)
@@ -149,10 +157,15 @@ async def login(body: LoginRequest, db: Session = Depends(get_db)):
     Returns HTTP 401 for any invalid credential to avoid leaking whether
     an email is registered.
     """
-    user = db.query(User).filter(User.email == body.email).first()
+    user = db.query(User).filter(User.email == body.email.lower()).first()
 
-    # Use verify_password even on a dummy hash to prevent timing attacks.
-    if user is None or not verify_password(body.password, user.hashed_password):
+    # Always call verify_password — even against a dummy hash when the user
+    # doesn't exist — so that the response time does not reveal whether the
+    # email is registered (timing side-channel prevention).
+    check_hash = user.hashed_password if user else DUMMY_BCRYPT_HASH
+    password_ok = verify_password(body.password, check_hash)
+
+    if not user or not password_ok:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect email or password.",
@@ -261,7 +274,7 @@ async def feedback_summary(
     This is the first concrete use of historical feedback data in the MVP.
     Win rates are computed from observed outcomes only — no prediction or ML.
     """
-    return get_feedback_summary(db)
+    return get_feedback_summary(db, user_id=current_user.id)
 
 
 @app.get("/api/feedback")
@@ -270,8 +283,8 @@ async def list_feedback(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Return recent feedback records across all analyses."""
-    return get_all_feedback(db, limit=limit)
+    """Return recent feedback records across all analyses owned by the current user."""
+    return get_all_feedback(db, user_id=current_user.id, limit=limit)
 
 
 # ---------------------------------------------------------------------------

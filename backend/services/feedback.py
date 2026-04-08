@@ -128,10 +128,12 @@ def get_feedback_for_rfp(db: Session, rfp_id: str) -> list[dict]:
     return [_serialize(fb) for fb in rows]
 
 
-def get_all_feedback(db: Session, limit: int = 200) -> list[dict]:
-    """Return the most recent feedback records across all analyses."""
+def get_all_feedback(db: Session, user_id: str, limit: int = 200) -> list[dict]:
+    """Return the most recent feedback records for analyses owned by user_id."""
     rows = (
         db.query(Feedback)
+        .join(RFP, Feedback.rfp_id == RFP.id)
+        .filter(RFP.user_id == user_id)
         .order_by(Feedback.created_at.desc())
         .limit(limit)
         .all()
@@ -139,7 +141,7 @@ def get_all_feedback(db: Session, limit: int = 200) -> list[dict]:
     return [_serialize(fb) for fb in rows]
 
 
-def get_feedback_summary(db: Session) -> dict:
+def get_feedback_summary(db: Session, user_id: str) -> dict:
     """
     Compute aggregate metrics from all feedback records.
 
@@ -152,7 +154,12 @@ def get_feedback_summary(db: Session) -> dict:
 
     All values are derived from observed data. No interpolation or prediction.
     """
-    rows = db.query(Feedback).all()
+    rows = (
+        db.query(Feedback)
+        .join(RFP, Feedback.rfp_id == RFP.id)
+        .filter(RFP.user_id == user_id)
+        .all()
+    )
     total = len(rows)
 
     if total == 0:

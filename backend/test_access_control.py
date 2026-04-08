@@ -25,13 +25,20 @@ sys.path.insert(0, ".")
 # ── In-memory DB ──────────────────────────────────────────────────────────────
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 from database import Base
 from models.rfp import RFP
 from models.feedback import Feedback    # noqa: F401
 from models.knowledge_document import KnowledgeDocument  # noqa: F401
 from models.user import User            # noqa: F401
 
-_engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+# StaticPool forces SQLAlchemy to reuse a single connection for all sessions.
+# Without it, SQLite in-memory creates a fresh (empty) DB per connection.
+_engine = create_engine(
+    "sqlite:///:memory:",
+    connect_args={"check_same_thread": False},
+    poolclass=StaticPool,
+)
 Base.metadata.create_all(bind=_engine)
 _Session = sessionmaker(bind=_engine)
 
@@ -232,9 +239,10 @@ def test_read_feedback_cross_user():
 def test_no_token_returns_403():
     bob_rfp = insert_rfp(bob_id, "no_auth_test.pdf")
 
-    assert client.get("/api/rfps").status_code == 403
-    assert client.get(f"/api/rfps/{bob_rfp}").status_code == 403
-    assert client.delete(f"/api/rfps/{bob_rfp}").status_code == 403
+    # FastAPI's HTTPBearer returns 401 or 403 depending on the version.
+    assert client.get("/api/rfps").status_code in (401, 403)
+    assert client.get(f"/api/rfps/{bob_rfp}").status_code in (401, 403)
+    assert client.delete(f"/api/rfps/{bob_rfp}").status_code in (401, 403)
     print("PASS test_no_token_returns_403")
 
 
@@ -323,6 +331,73 @@ def test_analyze_assigns_owner():
     print("PASS test_analyze_assigns_owner")
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Case 10: GET /api/feedback returns only feedback for the current user's RFPs
+# ═══════════════════════════════════════════════════════════════════════════
+def test_feedback_list_isolated_by_user():
+    """
+    Alice and Bob each have an RFP with a feedback record.
+    GET /api/feedback must return only the feedback for the requesting user's RFPs.
+    """
+    from services.feedback import record_feedback
+
+    alice_rfp = insert_rfp(alice_id, "alice_feedback_list.pdf")
+    bob_rfp   = insert_rfp(bob_id,   "bob_feedback_list.pdf")
+
+    # Record one feedback entry for each user's RFP.
+    db = _new_db()
+    try:
+        record_feedback(db, rfp_id=alice_rfp, outcome="won",  result_date="2025-01-01", notes=None)
+        record_feedback(db, rfp_id=bob_rfp,   outcome="lost", result_date="2025-01-02", notes=None)
+    finally:
+        db.close()
+
+    alice_resp = client.get("/api/feedback", headers=auth_headers(alice_token)).json()
+    bob_resp   = client.get("/api/feedback", headers=auth_headers(bob_token)).json()
+
+    alice_rfp_ids = {r["rfp_id"] for r in alice_resp}
+    bob_rfp_ids   = {r["rfp_id"] for r in bob_resp}
+
+    assert alice_rfp in alice_rfp_ids, "Alice must see feedback for her own RFP"
+    assert bob_rfp not in alice_rfp_ids, "Alice must NOT see feedback for Bob's RFP"
+    assert bob_rfp in bob_rfp_ids,     "Bob must see feedback for his own RFP"
+    assert alice_rfp not in bob_rfp_ids, "Bob must NOT see feedback for Alice's RFP"
+    print("PASS test_feedback_list_isolated_by_user")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Case 11: GET /api/feedback/summary is scoped to the current user's data
+# ═══════════════════════════════════════════════════════════════════════════
+def test_feedback_summary_isolated_by_user():
+    """
+    Alice has only 'won' outcomes; Bob has only 'lost' outcomes.
+    Each user's summary must reflect only their own data.
+    """
+    from services.feedback import record_feedback
+
+    alice_rfp = insert_rfp(alice_id, "alice_summary.pdf")
+    bob_rfp1  = insert_rfp(bob_id,   "bob_summary1.pdf")
+    bob_rfp2  = insert_rfp(bob_id,   "bob_summary2.pdf")
+
+    db = _new_db()
+    try:
+        record_feedback(db, rfp_id=alice_rfp, outcome="won",  result_date="2025-02-01", notes=None)
+        record_feedback(db, rfp_id=bob_rfp1,  outcome="lost", result_date="2025-02-02", notes=None)
+        record_feedback(db, rfp_id=bob_rfp2,  outcome="lost", result_date="2025-02-03", notes=None)
+    finally:
+        db.close()
+
+    alice_summary = client.get("/api/feedback/summary", headers=auth_headers(alice_token)).json()
+    bob_summary   = client.get("/api/feedback/summary", headers=auth_headers(bob_token)).json()
+
+    # Alice sees only wins; Bob sees only losses.
+    assert alice_summary["wins"] >= 1,    "Alice must have at least one win"
+    assert alice_summary["losses"] == 0,  "Alice must have zero losses"
+    assert bob_summary["losses"] >= 2,    "Bob must have at least two losses"
+    assert bob_summary["wins"] == 0,      "Bob must have zero wins"
+    print("PASS test_feedback_summary_isolated_by_user")
+
+
 # ── Run all ──────────────────────────────────────────────────────────────────
 test_list_isolation()
 test_read_cross_user()
@@ -333,5 +408,7 @@ test_read_feedback_cross_user()
 test_no_token_returns_403()
 test_owner_can_read_and_delete()
 test_analyze_assigns_owner()
+test_feedback_list_isolated_by_user()
+test_feedback_summary_isolated_by_user()
 
 print("\nAll access-control tests passed.")

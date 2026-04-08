@@ -21,6 +21,11 @@ ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24
 # bcrypt is intentionally the only scheme; no deprecated fallback.
 _pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
+# Pre-computed dummy hash used when the requested email does not exist.
+# Always running verify_password (even against this dummy) prevents a
+# timing side-channel that would reveal whether an email is registered.
+DUMMY_BCRYPT_HASH: str = _pwd_context.hash("__timing_guard__")
+
 
 # ── Password helpers ──────────────────────────────────────────────────────────
 

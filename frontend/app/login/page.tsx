@@ -10,7 +10,13 @@ export default function LoginPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
   // After login, redirect to the page the user tried to visit (default: home).
-  const callbackUrl = searchParams.get("callbackUrl") ?? "/";
+  // Validate callbackUrl to prevent open redirect attacks.
+  // Only allow relative paths that start with "/" but not "//".
+  const _rawCallback = searchParams.get("callbackUrl") ?? "/";
+  const callbackUrl =
+    _rawCallback.startsWith("/") && !_rawCallback.startsWith("//")
+      ? _rawCallback
+      : "/";
 
   const [mode, setMode] = useState<Mode>("login");
   const [email, setEmail] = useState("");
@@ -24,9 +30,12 @@ export default function LoginPage() {
     setLoading(true);
 
     if (mode === "register") {
-      // Call FastAPI register endpoint directly, then sign in.
+      // Call FastAPI backend directly using an absolute URL so Next.js route
+      // handlers (NextAuth's catch-all) cannot intercept the request.
       try {
-        const res = await fetch("/api/auth/register", {
+        const backendUrl =
+          process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+        const res = await fetch(`${backendUrl}/api/auth/register`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ email, password }),
