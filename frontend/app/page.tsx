@@ -54,11 +54,6 @@ export default function LandingPage() {
           <div className="mt-4 h-72 w-[600px] rounded-full bg-seed-950/60 blur-3xl" />
         </div>
         <div className="relative max-w-2xl mx-auto">
-          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full border border-[#27272a] bg-[#18181b] text-[#71717a] text-xs font-medium mb-8 tracking-wide uppercase">
-            <span className="w-1.5 h-1.5 rounded-full bg-seed-500 animate-pulse" />
-            Powered by Claude AI
-          </div>
-
           <h1 className="text-5xl sm:text-6xl font-bold text-[#fafafa] tracking-tight leading-[1.1] mb-6">
             Win more contracts.<br />
             <span className="text-seed-400">Bid smarter.</span>
