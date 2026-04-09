@@ -33,11 +33,19 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 # ── Configuration ─────────────────────────────────────────────────────────────
-EMBEDDING_MODEL      = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
-EMBEDDING_DIMS       = 1536          # text-embedding-3-small output dimension
-EMBEDDING_BATCH_SIZE = int(os.getenv("EMBEDDING_BATCH_SIZE", "100"))
-_MAX_RETRIES         = 3
-_RETRY_BASE_DELAY    = 1.0           # seconds; doubles each attempt
+# NOTE: EMBEDDING_MODEL is intentionally NOT cached as a module-level constant.
+# Read it fresh at call time so that changing the env var (e.g. rotating to a
+# larger model) takes effect without restarting the process.
+_DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small"
+EMBEDDING_DIMS           = 1536          # text-embedding-3-small output dimension
+EMBEDDING_BATCH_SIZE     = int(os.getenv("EMBEDDING_BATCH_SIZE", "100"))
+_MAX_RETRIES             = 3
+_RETRY_BASE_DELAY        = 1.0           # seconds; doubles each attempt
+
+
+def _get_model() -> str:
+    """Return the active embedding model name, read from env at call time."""
+    return os.getenv("EMBEDDING_MODEL", _DEFAULT_EMBEDDING_MODEL)
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -63,11 +71,12 @@ def embed_texts(texts: list[str]) -> list[Optional[list[float]]]:
         return [None] * len(texts)
 
     results: list[Optional[list[float]]] = [None] * len(texts)
+    model = _get_model()
 
     batch_count = 0
     for batch_start in range(0, len(texts), EMBEDDING_BATCH_SIZE):
         batch = texts[batch_start : batch_start + EMBEDDING_BATCH_SIZE]
-        batch_embeddings = _embed_batch_with_retry(batch, api_key)
+        batch_embeddings = _embed_batch_with_retry(batch, api_key, model)
         for j, emb in enumerate(batch_embeddings):
             results[batch_start + j] = emb
         batch_count += 1
@@ -75,7 +84,7 @@ def embed_texts(texts: list[str]) -> list[Optional[list[float]]]:
     embedded = sum(1 for r in results if r is not None)
     logger.info(
         "embed_texts: %d/%d texts embedded in %d batch(es) via %s",
-        embedded, len(texts), batch_count, EMBEDDING_MODEL,
+        embedded, len(texts), batch_count, model,
     )
     return results
 
@@ -96,6 +105,7 @@ def embeddings_available() -> bool:
 def _embed_batch_with_retry(
     texts: list[str],
     api_key: str,
+    model: str,
 ) -> list[Optional[list[float]]]:
     """
     POST to the OpenAI embeddings endpoint with exponential-backoff retry.
@@ -110,7 +120,7 @@ def _embed_batch_with_retry(
         "Content-Type":  "application/json",
     }
     payload = {
-        "model":           EMBEDDING_MODEL,
+        "model":           model,
         "input":           texts,
         "encoding_format": "float",
     }

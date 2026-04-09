@@ -286,22 +286,41 @@ def _insert_doc_with_chunks(db, doc_id, filename, chunks_with_embeddings):
 
 
 def test_semantic_search_ranks_correctly():
-    """Chunk most similar to the query should appear first."""
+    """Chunk most similar to the query should appear first; unrelated chunks excluded."""
     db = _new_db()
     try:
-        # Simple 4-dim vectors so we can reason about expected similarity
-        ml_vec       = [1.0, 0.0, 0.0, 0.0]   # "machine learning" direction
-        similar_vec  = [0.9, 0.1, 0.0, 0.0]   # similar to ML
-        orthog_vec   = [0.0, 0.0, 1.0, 0.0]   # unrelated
+        # Simple 4-dim vectors so we can reason about expected similarity.
+        # Use non-adjacent indices (0, 5, 10) so the dedup logic does not
+        # suppress the second relevant chunk.
+        ml_vec      = [1.0, 0.0, 0.0, 0.0]   # "machine learning" direction
+        similar_vec = [0.9, 0.1, 0.0, 0.0]   # similar to ML
+        orthog_vec  = [0.0, 0.0, 1.0, 0.0]   # unrelated
 
-        _insert_doc_with_chunks(db, "doc_rank_test", "ml_doc.txt", [
+        doc_id = "doc_rank_test"
+        doc = KnowledgeDocument(
+            id=doc_id, filename="ml_doc.txt", content_type="text/plain",
+            source="internal_upload", processing_status="completed",
+            embedding_status="completed", chunk_count=3,
+        )
+        db.add(doc)
+        for idx, (text, vec) in zip([0, 5, 10], [
             ("Machine learning improves accuracy.", ml_vec),
             ("AI research is growing rapidly.", similar_vec),
             ("Tax filing deadline is April 15.", orthog_vec),
-        ])
+        ]):
+            db.add(KnowledgeChunk(
+                id="chunk_" + uuid.uuid4().hex,
+                document_id=doc_id, chunk_index=idx,
+                text=text, char_count=len(text),
+                content_hash=f"hash_rank_{idx}",
+                embedding_json=json.dumps(vec),
+                embedding_model="test", embedding_dims=4,
+                chunk_type="text",
+            ))
+        db.commit()
 
         from services.vector_search import _find_similar_chunks
-        results = _find_similar_chunks([1.0, 0.0, 0.0, 0.0], db, top_k=5, document_id=None)
+        results = _find_similar_chunks([1.0, 0.0, 0.0, 0.0], db, top_k=5, document_id=doc_id)
 
         assert len(results) >= 2, "Should find ML and AI chunks above threshold"
         assert results[0]["relevance_score"] >= results[1]["relevance_score"], \
@@ -550,6 +569,355 @@ def test_index_document_partial_embedding_failure():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Owner isolation tests
+# ══════════════════════════════════════════════════════════════════════════════
+
+def test_owner_isolation_cross_user():
+    """User B cannot retrieve chunks uploaded by user A."""
+    from services.vector_search import _find_similar_chunks
+    db = _new_db()
+    try:
+        vec = [1.0, 0.0, 0.0, 0.0]
+        # Insert a document owned by user A
+        doc = KnowledgeDocument(
+            id="doc_owner_a", filename="a.txt", content_type="text/plain",
+            source="internal_upload", processing_status="completed",
+            embedding_status="completed", chunk_count=1, owner_id="user_A",
+        )
+        db.add(doc)
+        db.add(KnowledgeChunk(
+            id="chunk_" + uuid.uuid4().hex,
+            document_id="doc_owner_a", chunk_index=0,
+            text="Sensitive content owned by user A.",
+            char_count=35, content_hash="hash_a",
+            embedding_json=json.dumps(vec),
+            embedding_model="text-embedding-3-small",
+            embedding_dims=4, chunk_type="text",
+        ))
+        db.commit()
+
+        # User B's search must return nothing
+        results_b = _find_similar_chunks(vec, db, top_k=5, document_id=None, user_id="user_B")
+        assert results_b == [], (
+            f"User B should not see user A's chunks, got: {results_b}"
+        )
+
+        # User A's search must find the chunk
+        results_a = _find_similar_chunks(vec, db, top_k=5, document_id=None, user_id="user_A")
+        assert len(results_a) >= 1, "User A should see their own chunks"
+        assert results_a[0]["document_id"] == "doc_owner_a"
+
+        print("PASS test_owner_isolation_cross_user")
+    finally:
+        db.close()
+
+
+def test_owner_isolation_no_user_id_excludes_owned():
+    """When user_id is provided, docs with owner_id=NULL are not returned."""
+    from services.vector_search import _find_similar_chunks
+    db = _new_db()
+    try:
+        vec = [1.0, 0.0, 0.0, 0.0]
+        # Insert a legacy document with no owner
+        doc = KnowledgeDocument(
+            id="doc_legacy_iso", filename="legacy.txt", content_type="text/plain",
+            source="internal_upload", processing_status="completed",
+            embedding_status="completed", chunk_count=1, owner_id=None,
+        )
+        db.add(doc)
+        db.add(KnowledgeChunk(
+            id="chunk_" + uuid.uuid4().hex,
+            document_id="doc_legacy_iso", chunk_index=0,
+            text="Legacy document with no owner.",
+            char_count=30, content_hash="hash_legacy_iso",
+            embedding_json=json.dumps(vec),
+            embedding_model="text-embedding-3-small",
+            embedding_dims=4, chunk_type="text",
+        ))
+        db.commit()
+
+        # A scoped query (user_id="some_user") must NOT return the ownerless doc
+        results = _find_similar_chunks(vec, db, top_k=5, document_id=None, user_id="some_user")
+        doc_ids = {r["document_id"] for r in results}
+        assert "doc_legacy_iso" not in doc_ids, (
+            "Ownerless (legacy) docs must not be returned when user_id is scoped"
+        )
+        print("PASS test_owner_isolation_no_user_id_excludes_owned")
+    finally:
+        db.close()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Embedding dimension guard tests
+# ══════════════════════════════════════════════════════════════════════════════
+
+def test_dimension_mismatch_returns_empty():
+    """
+    Chunks stored with 4-dim embeddings, queried with a 3-dim vector → [].
+    The dim guard must filter all chunks and return empty without crashing.
+    """
+    from services.vector_search import _find_similar_chunks
+    db = _new_db()
+    try:
+        # Stored embedding: 4 dims
+        vec4 = [1.0, 0.0, 0.0, 0.0]
+        doc = KnowledgeDocument(
+            id="doc_dim_mismatch", filename="dim.txt", content_type="text/plain",
+            source="internal_upload", processing_status="completed",
+            embedding_status="completed", chunk_count=1, owner_id=None,
+        )
+        db.add(doc)
+        db.add(KnowledgeChunk(
+            id="chunk_" + uuid.uuid4().hex,
+            document_id="doc_dim_mismatch", chunk_index=0,
+            text="Some content with a 4-dim embedding.",
+            char_count=36, content_hash="hash_dim",
+            embedding_json=json.dumps(vec4),
+            embedding_model="text-embedding-3-small",
+            embedding_dims=4, chunk_type="text",
+        ))
+        db.commit()
+
+        # Query with a 3-dim vector — should not match 4-dim stored embeddings
+        results = _find_similar_chunks(
+            [1.0, 0.0, 0.0], db, top_k=5, document_id="doc_dim_mismatch"
+        )
+        assert results == [], (
+            f"Dimension mismatch must return [], got: {results}"
+        )
+        print("PASS test_dimension_mismatch_returns_empty")
+    finally:
+        db.close()
+
+
+def test_dimension_mismatch_does_not_affect_compatible_chunks():
+    """
+    Mixed pool: 3-dim and 4-dim chunks. Only 3-dim chunks returned for 3-dim query.
+    """
+    from services.vector_search import _find_similar_chunks
+    db = _new_db()
+    try:
+        doc_id = "doc_dim_mixed"
+        doc = KnowledgeDocument(
+            id=doc_id, filename="mixed.txt", content_type="text/plain",
+            source="internal_upload", processing_status="completed",
+            embedding_status="completed", chunk_count=2, owner_id=None,
+        )
+        db.add(doc)
+        # 3-dim chunk (compatible)
+        db.add(KnowledgeChunk(
+            id="chunk_" + uuid.uuid4().hex,
+            document_id=doc_id, chunk_index=0,
+            text="Three dimensional chunk.",
+            char_count=24, content_hash="hash_3d",
+            embedding_json=json.dumps([1.0, 0.0, 0.0]),
+            embedding_model="model-v1",
+            embedding_dims=3, chunk_type="text",
+        ))
+        # 4-dim chunk (incompatible with 3-dim query)
+        db.add(KnowledgeChunk(
+            id="chunk_" + uuid.uuid4().hex,
+            document_id=doc_id, chunk_index=1,
+            text="Four dimensional chunk.",
+            char_count=23, content_hash="hash_4d",
+            embedding_json=json.dumps([1.0, 0.0, 0.0, 0.0]),
+            embedding_model="model-v2",
+            embedding_dims=4, chunk_type="text",
+        ))
+        db.commit()
+
+        results = _find_similar_chunks(
+            [1.0, 0.0, 0.0], db, top_k=5, document_id=doc_id
+        )
+        # Only the 3-dim chunk is compatible
+        assert len(results) == 1, f"Expected exactly 1 compatible result, got {len(results)}"
+        assert "Three dimensional" in results[0]["snippet"]
+        print("PASS test_dimension_mismatch_does_not_affect_compatible_chunks")
+    finally:
+        db.close()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Indexing failure recovery tests
+# ══════════════════════════════════════════════════════════════════════════════
+
+def test_index_document_chunks_sets_failed_on_exception():
+    """If embed_texts raises an exception, embedding_status is set to 'failed'."""
+    from services.knowledge import KNOWLEDGE_DIR, index_document_chunks
+
+    db = _new_db()
+    doc_id = "doc_fail_" + uuid.uuid4().hex[:8]
+    try:
+        db.add(KnowledgeDocument(
+            id=doc_id, filename="fail.txt", content_type="text/plain",
+            source="internal_upload", processing_status="completed",
+            embedding_status="not_indexed", chunk_count=0,
+        ))
+        db.commit()
+
+        KNOWLEDGE_DIR.mkdir(exist_ok=True)
+        text_path = KNOWLEDGE_DIR / f"{doc_id}.txt"
+        # Text must exceed CHUNK_MIN_CHARS (100) so at least one chunk is produced
+        # and embed_texts is actually invoked.
+        text_path.write_text(
+            "This paragraph is long enough to survive the minimum character filter "
+            "used by the chunker and will definitely produce at least one chunk.",
+            encoding="utf-8",
+        )
+
+        def _always_raises(texts):
+            raise RuntimeError("Simulated OpenAI outage")
+
+        with patch("services.embeddings.embed_texts", side_effect=_always_raises):
+            index_document_chunks(doc_id, db)
+
+        doc = db.query(KnowledgeDocument).filter(KnowledgeDocument.id == doc_id).first()
+        assert doc.embedding_status == "failed", (
+            f"Expected 'failed' after exception, got '{doc.embedding_status}'"
+        )
+        print("PASS test_index_document_chunks_sets_failed_on_exception")
+    finally:
+        text_path = KNOWLEDGE_DIR / f"{doc_id}.txt"
+        if text_path.exists():
+            text_path.unlink()
+        db.close()
+
+
+def test_index_document_chunks_status_not_stuck_at_pending():
+    """embedding_status must not remain 'pending' after any outcome."""
+    from services.knowledge import KNOWLEDGE_DIR, index_document_chunks
+
+    db = _new_db()
+    doc_id = "doc_pend_" + uuid.uuid4().hex[:8]
+    try:
+        db.add(KnowledgeDocument(
+            id=doc_id, filename="pend.txt", content_type="text/plain",
+            source="internal_upload", processing_status="completed",
+            embedding_status="not_indexed", chunk_count=0,
+        ))
+        db.commit()
+
+        KNOWLEDGE_DIR.mkdir(exist_ok=True)
+        text_path = KNOWLEDGE_DIR / f"{doc_id}.txt"
+        # Text must exceed CHUNK_MIN_CHARS so at least one chunk is produced
+        text_path.write_text(
+            "This paragraph is long enough to survive the minimum character filter "
+            "used by the chunker and will definitely produce at least one chunk.",
+            encoding="utf-8",
+        )
+
+        # Simulate a crash mid-way
+        def _crash(texts):
+            raise MemoryError("OOM")
+
+        with patch("services.embeddings.embed_texts", side_effect=_crash):
+            index_document_chunks(doc_id, db)
+
+        doc = db.query(KnowledgeDocument).filter(KnowledgeDocument.id == doc_id).first()
+        assert doc.embedding_status != "pending", (
+            f"embedding_status must not be stuck at 'pending', got '{doc.embedding_status}'"
+        )
+        print("PASS test_index_document_chunks_status_not_stuck_at_pending")
+    finally:
+        text_path = KNOWLEDGE_DIR / f"{doc_id}.txt"
+        if text_path.exists():
+            text_path.unlink()
+        db.close()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Deduplication tests
+# ══════════════════════════════════════════════════════════════════════════════
+
+def test_adjacent_chunks_are_deduplicated():
+    """
+    Two adjacent chunks from the same document should not both appear in top-K.
+    The higher-scoring one wins; the adjacent duplicate is suppressed.
+    """
+    from services.vector_search import _find_similar_chunks
+    db = _new_db()
+    try:
+        doc_id = "doc_dedup_adj"
+        vec = [1.0, 0.0, 0.0, 0.0]   # identical vectors → same score
+        doc = KnowledgeDocument(
+            id=doc_id, filename="dedup.txt", content_type="text/plain",
+            source="internal_upload", processing_status="completed",
+            embedding_status="completed", chunk_count=2, owner_id=None,
+        )
+        db.add(doc)
+        # chunk_index=0 and chunk_index=1 are adjacent — only one should appear
+        db.add(KnowledgeChunk(
+            id="chunk_" + uuid.uuid4().hex,
+            document_id=doc_id, chunk_index=0,
+            text="Chunk zero content about machine learning systems.",
+            char_count=50, content_hash="hash_d0",
+            embedding_json=json.dumps(vec), embedding_model="m",
+            embedding_dims=4, chunk_type="text",
+        ))
+        db.add(KnowledgeChunk(
+            id="chunk_" + uuid.uuid4().hex,
+            document_id=doc_id, chunk_index=1,
+            text="Chunk one content also about machine learning methods.",
+            char_count=52, content_hash="hash_d1",
+            embedding_json=json.dumps(vec), embedding_model="m",
+            embedding_dims=4, chunk_type="text",
+        ))
+        db.commit()
+
+        results = _find_similar_chunks(vec, db, top_k=5, document_id=doc_id)
+        # Only one of the two adjacent chunks should appear
+        assert len(results) == 1, (
+            f"Expected 1 result after dedup (adjacent chunks), got {len(results)}"
+        )
+        print("PASS test_adjacent_chunks_are_deduplicated")
+    finally:
+        db.close()
+
+
+def test_non_adjacent_chunks_are_not_deduplicated():
+    """
+    Chunks from the same document with non-adjacent indices (gap > 1) must both appear.
+    """
+    from services.vector_search import _find_similar_chunks
+    db = _new_db()
+    try:
+        doc_id = "doc_dedup_gap"
+        vec = [1.0, 0.0, 0.0, 0.0]
+        doc = KnowledgeDocument(
+            id=doc_id, filename="gap.txt", content_type="text/plain",
+            source="internal_upload", processing_status="completed",
+            embedding_status="completed", chunk_count=2, owner_id=None,
+        )
+        db.add(doc)
+        # chunk_index=0 and chunk_index=5 — gap of 5, no overlap
+        db.add(KnowledgeChunk(
+            id="chunk_" + uuid.uuid4().hex,
+            document_id=doc_id, chunk_index=0,
+            text="First relevant section about procurement strategy.",
+            char_count=49, content_hash="hash_g0",
+            embedding_json=json.dumps(vec), embedding_model="m",
+            embedding_dims=4, chunk_type="text",
+        ))
+        db.add(KnowledgeChunk(
+            id="chunk_" + uuid.uuid4().hex,
+            document_id=doc_id, chunk_index=5,
+            text="Fifth relevant section about contract evaluation.",
+            char_count=49, content_hash="hash_g5",
+            embedding_json=json.dumps(vec), embedding_model="m",
+            embedding_dims=4, chunk_type="text",
+        ))
+        db.commit()
+
+        results = _find_similar_chunks(vec, db, top_k=5, document_id=doc_id)
+        assert len(results) == 2, (
+            f"Non-adjacent chunks from the same doc must both appear, got {len(results)}"
+        )
+        print("PASS test_non_adjacent_chunks_are_not_deduplicated")
+    finally:
+        db.close()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Fallback behaviour
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -667,6 +1035,19 @@ test_semantic_search_document_id_scoping()
 test_index_document_chunks_creates_records()
 test_index_document_chunks_idempotent()
 test_index_document_partial_embedding_failure()
+# Owner isolation
+test_owner_isolation_cross_user()
+test_owner_isolation_no_user_id_excludes_owned()
+# Dimension guard
+test_dimension_mismatch_returns_empty()
+test_dimension_mismatch_does_not_affect_compatible_chunks()
+# Failure recovery
+test_index_document_chunks_sets_failed_on_exception()
+test_index_document_chunks_status_not_stuck_at_pending()
+# Deduplication
+test_adjacent_chunks_are_deduplicated()
+test_non_adjacent_chunks_are_not_deduplicated()
+# Fallback
 test_search_knowledge_falls_back_to_keyword()
 test_search_knowledge_no_db_uses_keyword()
 test_search_knowledge_semantic_preferred_over_keyword()

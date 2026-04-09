@@ -296,7 +296,7 @@ async def list_feedback(
 @app.post("/api/knowledge")
 async def upload_knowledge_document(
     file: UploadFile = File(...),
-    background_tasks: BackgroundTasks = BackgroundTasks(),
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -312,6 +312,7 @@ async def upload_knowledge_document(
             filename=file.filename or "upload",
             content_type=file.content_type or "",
             file_bytes=file_bytes,
+            owner_id=current_user.id,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
@@ -358,7 +359,7 @@ class ReindexRequest(BaseModel):
 @app.post("/api/knowledge/reindex")
 async def reindex_knowledge(
     body: ReindexRequest = Body(default_factory=ReindexRequest),
-    background_tasks: BackgroundTasks = BackgroundTasks(),
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -854,7 +855,7 @@ async def _execute_pipeline_steps(
             if requirements.get("summary"):
                 kb_query_parts.append(requirements["summary"])
             kb_query = " ".join(kb_query_parts).strip()
-            knowledge_results = search_knowledge(kb_query, db=db) if kb_query else []
+            knowledge_results = search_knowledge(kb_query, db=db, user_id=rfp.user_id) if kb_query else []
 
             rfp.requirements   = json.dumps(requirements)
             rfp.risks          = json.dumps(risks)

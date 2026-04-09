@@ -23,15 +23,19 @@ def search_knowledge(
     query: str,
     db: Optional[Session] = None,
     top_k: int = 5,
+    user_id: Optional[str] = None,
 ) -> list[dict]:
     """
     Return top-K knowledge items most relevant to *query*.
     Tries semantic search first; falls back to keyword if unavailable.
+
+    user_id — when provided, only documents owned by that user are searched.
+              Always pass the authenticated user's ID from the request context.
     """
     if db is not None:
         try:
             from services.vector_search import semantic_search
-            results = semantic_search(query, db, top_k=top_k)
+            results = semantic_search(query, db, top_k=top_k, user_id=user_id)
             if results:
                 logger.debug("search_knowledge: semantic returned %d results", len(results))
                 return results
@@ -46,10 +50,14 @@ def upload_document(
     filename: str,
     content_type: str,
     file_bytes: bytes,
+    owner_id: Optional[str] = None,
 ) -> KnowledgeDocument:
     """
     Validate, extract text, persist file, and create a DB metadata record.
     Chunking/embedding is done by a BackgroundTask in main.py via index_document_chunks().
+
+    owner_id — the authenticated user's ID; stored on the document so that
+               semantic search can be scoped per-user.
     """
     _validate_upload(filename, content_type, len(file_bytes))
 
@@ -64,6 +72,7 @@ def upload_document(
         processing_status = "pending",
         embedding_status  = "not_indexed",
         chunk_count       = 0,
+        owner_id          = owner_id,
     )
     db.add(doc)
     db.commit()
@@ -90,7 +99,7 @@ def index_document_chunks(doc_id: str, db: Session) -> None:
     """
     from models.knowledge_chunk import KnowledgeChunk
     from services.chunker import chunk_document
-    from services.embeddings import embed_texts, EMBEDDING_MODEL
+    from services.embeddings import embed_texts, _get_model
 
     doc = db.query(KnowledgeDocument).filter(KnowledgeDocument.id == doc_id).first()
     if not doc:
@@ -114,56 +123,69 @@ def index_document_chunks(doc_id: str, db: Session) -> None:
     doc.embedding_status = "pending"
     db.commit()
 
-    chunks = chunk_document(text)
-    logger.info("index_document_chunks: doc %s → %d chunks", doc_id, len(chunks))
+    try:
+        chunks = chunk_document(text)
+        logger.info("index_document_chunks: doc %s → %d chunks", doc_id, len(chunks))
 
-    if not chunks:
-        doc.embedding_status = "completed"
-        doc.chunk_count      = 0
+        if not chunks:
+            doc.embedding_status = "completed"
+            doc.chunk_count      = 0
+            db.commit()
+            return
+
+        # Delete existing chunks for idempotency
+        deleted = db.query(KnowledgeChunk).filter(KnowledgeChunk.document_id == doc_id).delete()
+        if deleted:
+            logger.debug("index_document_chunks: replaced %d old chunks for doc %s", deleted, doc_id)
         db.commit()
-        return
 
-    # Delete existing chunks for idempotency
-    deleted = db.query(KnowledgeChunk).filter(KnowledgeChunk.document_id == doc_id).delete()
-    if deleted:
-        logger.debug("index_document_chunks: replaced %d old chunks for doc %s", deleted, doc_id)
-    db.commit()
+        chunk_texts    = [c["text"] for c in chunks]
+        embeddings     = embed_texts(chunk_texts)
+        active_model   = _get_model()   # snapshot the model name used for this run
 
-    chunk_texts = [c["text"] for c in chunks]
-    embeddings  = embed_texts(chunk_texts)
+        failed_count = 0
+        for chunk_data, embedding in zip(chunks, embeddings):
+            db.add(KnowledgeChunk(
+                id              = "chunk_" + uuid.uuid4().hex,
+                document_id     = doc_id,
+                chunk_index     = chunk_data["chunk_index"],
+                text            = chunk_data["text"],
+                char_count      = chunk_data["char_count"],
+                content_hash    = chunk_data["content_hash"],
+                chunk_type      = chunk_data["chunk_type"],
+                embedding_json  = json.dumps(embedding) if embedding is not None else None,
+                embedding_model = active_model if embedding is not None else None,
+                embedding_dims  = len(embedding) if embedding is not None else None,
+            ))
+            if embedding is None:
+                failed_count += 1
+        db.commit()
 
-    failed_count = 0
-    for chunk_data, embedding in zip(chunks, embeddings):
-        db.add(KnowledgeChunk(
-            id              = "chunk_" + uuid.uuid4().hex,
-            document_id     = doc_id,
-            chunk_index     = chunk_data["chunk_index"],
-            text            = chunk_data["text"],
-            char_count      = chunk_data["char_count"],
-            content_hash    = chunk_data["content_hash"],
-            chunk_type      = chunk_data["chunk_type"],
-            embedding_json  = json.dumps(embedding) if embedding is not None else None,
-            embedding_model = EMBEDDING_MODEL if embedding is not None else None,
-            embedding_dims  = len(embedding) if embedding is not None else None,
-        ))
-        if embedding is None:
-            failed_count += 1
-    db.commit()
+        success_count = len(chunks) - failed_count
+        if failed_count == 0:
+            doc.embedding_status = "completed"
+        elif success_count == 0:
+            doc.embedding_status = "failed"
+        else:
+            doc.embedding_status = "partial"
+        doc.chunk_count = len(chunks)
+        db.commit()
 
-    success_count = len(chunks) - failed_count
-    if failed_count == 0:
-        doc.embedding_status = "completed"
-    elif success_count == 0:
+        logger.info(
+            "index_document_chunks: doc %s — %d/%d chunks embedded (status=%s)",
+            doc_id, success_count, len(chunks), doc.embedding_status,
+        )
+
+    except Exception as exc:
+        logger.error(
+            "index_document_chunks: unexpected error for doc %s: %s",
+            doc_id, exc, exc_info=True,
+        )
         doc.embedding_status = "failed"
-    else:
-        doc.embedding_status = "partial"
-    doc.chunk_count = len(chunks)
-    db.commit()
-
-    logger.info(
-        "index_document_chunks: doc %s — %d/%d chunks embedded (status=%s)",
-        doc_id, success_count, len(chunks), doc.embedding_status,
-    )
+        try:
+            db.commit()
+        except Exception:
+            pass
 
 
 def list_documents(db: Session) -> list[dict]:
@@ -259,4 +281,5 @@ def _serialize(doc: KnowledgeDocument) -> dict:
         "uploaded_at":       doc.uploaded_at.isoformat() if doc.uploaded_at else None,
         "embedding_status":  getattr(doc, "embedding_status", "not_indexed"),
         "chunk_count":       getattr(doc, "chunk_count", 0),
+        "owner_id":          getattr(doc, "owner_id", None),
     }

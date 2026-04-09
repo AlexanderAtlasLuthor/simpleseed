@@ -1,6 +1,7 @@
 import os
+import sqlite3
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import sessionmaker, DeclarativeBase
 from dotenv import load_dotenv
 
@@ -27,6 +28,14 @@ if _is_sqlite:
         DATABASE_URL,
         connect_args={"check_same_thread": False},
     )
+
+    # Enable FK enforcement on every connection.  SQLite ignores foreign-key
+    # constraints (including ON DELETE CASCADE) unless this pragma is set.
+    @event.listens_for(engine, "connect")
+    def _set_sqlite_fk_pragma(dbapi_conn, _connection_record):
+        if isinstance(dbapi_conn, sqlite3.Connection):
+            dbapi_conn.execute("PRAGMA foreign_keys=ON")
+
 else:
     # PostgreSQL (or any other production RDBMS):
     # - pool_pre_ping: validate each connection before handing it to a request;
@@ -157,6 +166,8 @@ def _migrate() -> None:
             kd_columns: dict[str, str] = {
                 "embedding_status": "TEXT NOT NULL DEFAULT 'not_indexed'",
                 "chunk_count":      "INTEGER NOT NULL DEFAULT 0",
+                # owner_id: nullable so pre-auth documents are preserved
+                "owner_id":         "TEXT",
             }
             for col, definition in kd_columns.items():
                 if col not in existing_kd:

@@ -4,9 +4,11 @@ Semantic vector search over knowledge chunks.
 Search strategy
 ---------------
 1. Embed the query string via the embedding service.
-2. Load all chunks that have embeddings from the DB.
-3. Compute cosine similarity in-memory with numpy.
-4. Return top-K results above SIMILARITY_THRESHOLD.
+2. Load chunks that have embeddings from the DB (scoped to owner when provided).
+3. Filter out chunks whose stored embedding dims don't match the query dims.
+4. Compute cosine similarity in-memory with numpy.
+5. Deduplicate adjacent overlapping chunks from the same document.
+6. Return top-K results above SIMILARITY_THRESHOLD.
 
 Scalability note
 ----------------
@@ -28,10 +30,10 @@ In-memory numpy similarity is adequate for up to ~50 000 chunks
 
 Owner scoping
 -------------
-The knowledge base is currently shared across all authenticated users
-(no per-user ownership on KnowledgeDocument).  If user-scoped KB is
-added later, add `.filter(KnowledgeDocument.user_id == user_id)` to
-the query in _find_similar_chunks().
+Pass user_id to semantic_search() to restrict results to that user's documents.
+This is enforced at the DB query level via KnowledgeDocument.owner_id.
+Documents with owner_id=NULL (pre-auth legacy data) are excluded when a
+user_id is provided, preventing cross-user leakage.
 
 Fallback
 --------
@@ -40,7 +42,6 @@ semantic_search() returns [] — the caller in knowledge.py then falls
 back to keyword matching transparently.
 """
 
-import json
 import logging
 from typing import Optional
 
@@ -48,8 +49,11 @@ from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
 
-SIMILARITY_THRESHOLD = 0.30   # cosine similarity floor (0 = orthogonal, 1 = identical)
+SIMILARITY_THRESHOLD = 0.30    # cosine similarity floor (0 = orthogonal, 1 = identical)
 DEFAULT_TOP_K        = 5
+# Safety cap: load at most this many embedded chunks into memory per query.
+# At ~20 KB per chunk (JSON float32) this caps in-process memory at ~200 MB.
+_MAX_CHUNKS_IN_MEMORY = 10_000
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -59,9 +63,13 @@ def semantic_search(
     db: Session,
     top_k: int = DEFAULT_TOP_K,
     document_id: Optional[str] = None,
+    user_id: Optional[str] = None,
 ) -> list[dict]:
     """
     Find the top-K knowledge chunks most semantically similar to *query*.
+
+    user_id — when provided, only chunks belonging to that user's documents
+              are considered.  Pass the authenticated user's ID here.
 
     Returns a list of dicts compatible with the existing knowledge_context
     format consumed by generate_proposal():
@@ -70,7 +78,7 @@ def semantic_search(
             "filename":         str,
             "chunk_id":         str,
             "chunk_index":      int,
-            "snippet":          str,   # first 500 chars of chunk text
+            "snippet":          str,   # full chunk text (truncated by generator)
             "relevance_score":  float, # cosine similarity in [0, 1]
             "retrieval_method": "semantic",
         }
@@ -87,7 +95,7 @@ def semantic_search(
         logger.warning("Query embedding failed — semantic search skipped")
         return []
 
-    return _find_similar_chunks(query_embedding, db, top_k, document_id)
+    return _find_similar_chunks(query_embedding, db, top_k, document_id, user_id)
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
@@ -97,10 +105,19 @@ def _find_similar_chunks(
     db: Session,
     top_k: int,
     document_id: Optional[str],
+    user_id: Optional[str] = None,
 ) -> list[dict]:
     """
     Load embedded chunks, compute cosine similarity, return top-K results.
+
+    Applies three safety checks before scoring:
+      1. Owner scope  — only chunks from user_id's documents (if provided).
+      2. Dim guard    — skip chunks whose stored dims differ from the query.
+      3. Memory cap   — fetch at most _MAX_CHUNKS_IN_MEMORY rows.
+    After scoring, adjacent overlapping chunks from the same document are
+    deduplicated so only the highest-scoring one of each adjacent pair appears.
     """
+    import json
     import numpy as np
     from models.knowledge_chunk import KnowledgeChunk
     from models.knowledge_document import KnowledgeDocument
@@ -113,17 +130,23 @@ def _find_similar_chunks(
             KnowledgeDocument.processing_status == "completed",
         )
     )
+    # ── Owner scope ───────────────────────────────────────────────────────────
+    if user_id is not None:
+        q = q.filter(KnowledgeDocument.owner_id == user_id)
+
     if document_id:
         q = q.filter(KnowledgeChunk.document_id == document_id)
 
-    rows = q.all()
+    # ── Memory safety cap ─────────────────────────────────────────────────────
+    rows = q.limit(_MAX_CHUNKS_IN_MEMORY).all()
 
     if not rows:
         logger.debug("No embedded chunks found — semantic search returns empty")
         return []
 
-    # ── Build matrix ──────────────────────────────────────────────────────────
+    # ── Build matrix (with dimension guard) ──────────────────────────────────
     query_arr  = np.array(query_vec, dtype=np.float32)
+    query_dims = len(query_arr)
     query_norm = np.linalg.norm(query_arr)
     if query_norm == 0:
         return []
@@ -131,14 +154,26 @@ def _find_similar_chunks(
 
     chunk_objs: list[tuple] = []
     chunk_vecs: list[list]  = []
+    skipped_dim_mismatch    = 0
 
     for chunk, filename in rows:
+        # Dimension guard: skip chunks indexed with a different model
+        if chunk.embedding_dims is not None and chunk.embedding_dims != query_dims:
+            skipped_dim_mismatch += 1
+            continue
         try:
             vec = json.loads(chunk.embedding_json)
             chunk_vecs.append(vec)
             chunk_objs.append((chunk, filename))
         except (json.JSONDecodeError, TypeError, ValueError):
             logger.warning("Skipping chunk %s — invalid embedding JSON", chunk.id)
+
+    if skipped_dim_mismatch:
+        logger.warning(
+            "Skipped %d chunk(s) with incompatible embedding dims "
+            "(query=%d). Re-index after changing EMBEDDING_MODEL.",
+            skipped_dim_mismatch, query_dims,
+        )
 
     if not chunk_vecs:
         return []
@@ -150,10 +185,14 @@ def _find_similar_chunks(
 
     similarities = unit_matrix @ query_unit                 # (N,) cosine sims
 
-    # ── Rank and filter ───────────────────────────────────────────────────────
+    # ── Rank, filter, and deduplicate ─────────────────────────────────────────
     indices = np.argsort(similarities)[::-1]
 
-    results = []
+    results: list[dict] = []
+    # Track which chunk_indices per document are already in results.
+    # Used to suppress adjacent overlapping chunks (diff <= 1).
+    included: dict[str, set[int]] = {}
+
     for idx in indices:
         if len(results) >= top_k:
             break
@@ -161,18 +200,29 @@ def _find_similar_chunks(
         if sim < SIMILARITY_THRESHOLD:
             break
         chunk, filename = chunk_objs[idx]
+
+        # Dedup: if a chunk from the same doc with adjacent index is already
+        # in results, skip this one — it's an overlap duplicate.
+        doc_included = included.get(chunk.document_id, set())
+        if any(abs(chunk.chunk_index - ci) <= 1 for ci in doc_included):
+            continue
+
+        included.setdefault(chunk.document_id, set()).add(chunk.chunk_index)
         results.append({
             "document_id":      chunk.document_id,
             "filename":         filename,
             "chunk_id":         chunk.id,
             "chunk_index":      chunk.chunk_index,
-            "snippet":          chunk.text[:500],
+            # Full text — generator owns truncation to its context window size.
+            "snippet":          chunk.text,
             "relevance_score":  round(sim, 4),
             "retrieval_method": "semantic",
         })
 
     logger.debug(
-        "semantic_search: %d results (pool=%d, threshold=%.2f, top_k=%d)",
+        "semantic_search: %d results (pool=%d, threshold=%.2f, top_k=%d, "
+        "dim_skipped=%d, dedup_applied=%s)",
         len(results), len(chunk_vecs), SIMILARITY_THRESHOLD, top_k,
+        skipped_dim_mismatch, bool(included),
     )
     return results
