@@ -4,7 +4,7 @@ import uuid
 from typing import Optional
 from pathlib import Path
 
-from fastapi import Body, Depends, FastAPI, File, Form, HTTPException, Query, UploadFile, status
+from fastapi import BackgroundTasks, Body, Depends, FastAPI, File, Form, HTTPException, Query, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr, HttpUrl
 from sqlalchemy.orm import Session
@@ -17,7 +17,9 @@ from models.user import User
 from services.auth import DUMMY_BCRYPT_HASH, create_access_token, hash_password, verify_password
 from services.extractor import extract_requirements
 from services.feedback import get_all_feedback, get_feedback_for_rfp, get_feedback_summary, record_feedback
-from services.knowledge import get_document, list_documents, search_knowledge, upload_document
+from services.knowledge import (
+    get_document, index_document_chunks, list_documents, search_knowledge, upload_document,
+)
 from services.fetcher import fetch_url_text
 from services.generator import generate_proposal
 from services.industry import SUPPORTED_INDUSTRIES, resolve_industry
@@ -294,12 +296,14 @@ async def list_feedback(
 @app.post("/api/knowledge")
 async def upload_knowledge_document(
     file: UploadFile = File(...),
+    background_tasks: BackgroundTasks = BackgroundTasks(),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """
     Upload a PDF or plain-text file to the internal knowledge base.
-    The extracted text is indexed for keyword search via GET /api/knowledge/search.
+    Text extraction is synchronous; chunking + embedding run as a background
+    task so the response returns immediately with embedding_status="pending".
     """
     file_bytes = await file.read()
     try:
@@ -311,6 +315,10 @@ async def upload_knowledge_document(
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
+
+    # Queue chunk indexing asynchronously — creates its own DB session
+    if doc.processing_status == "completed":
+        background_tasks.add_task(_index_document_background, doc.id)
 
     from services.knowledge import _serialize
     result = _serialize(doc)
@@ -340,6 +348,42 @@ async def get_knowledge_document(
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
     return doc
+
+
+class ReindexRequest(BaseModel):
+    document_id: Optional[str] = None  # None → reindex all eligible documents
+    force: bool = False                 # True → re-embed even already-completed docs
+
+
+@app.post("/api/knowledge/reindex")
+async def reindex_knowledge(
+    body: ReindexRequest = Body(default_factory=ReindexRequest),
+    background_tasks: BackgroundTasks = BackgroundTasks(),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Queue (re)indexing of knowledge documents for semantic search.
+
+    By default only un-indexed documents are queued.
+    Pass force=true to re-embed every completed document from scratch.
+    Runs as background tasks — returns immediately with the list of doc IDs queued.
+    """
+    from models.knowledge_document import KnowledgeDocument as KD
+
+    q = db.query(KD).filter(KD.processing_status == "completed")
+    if body.document_id:
+        q = q.filter(KD.id == body.document_id)
+    elif not body.force:
+        q = q.filter(KD.embedding_status != "completed")
+
+    docs = q.all()
+    queued = []
+    for doc in docs:
+        background_tasks.add_task(_index_document_background, doc.id)
+        queued.append(doc.id)
+
+    return {"queued": queued, "count": len(queued)}
 
 
 @app.get("/api/scoring-config")
@@ -590,6 +634,27 @@ async def sam_analyze(
 
 
 # ---------------------------------------------------------------------------
+# Background helpers
+# ---------------------------------------------------------------------------
+
+def _index_document_background(doc_id: str) -> None:
+    """
+    Run chunk indexing in a background task using its own DB session.
+    The request-scoped session is already closed by the time this runs.
+    """
+    import logging as _logging
+    from database import SessionLocal
+    _log = _logging.getLogger(__name__)
+    db = SessionLocal()
+    try:
+        index_document_chunks(doc_id, db)
+    except Exception as exc:
+        _log.error("Background indexing failed for doc %s: %s", doc_id, exc)
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
 # Ownership helper
 # ---------------------------------------------------------------------------
 
@@ -789,7 +854,7 @@ async def _execute_pipeline_steps(
             if requirements.get("summary"):
                 kb_query_parts.append(requirements["summary"])
             kb_query = " ".join(kb_query_parts).strip()
-            knowledge_results = search_knowledge(kb_query) if kb_query else []
+            knowledge_results = search_knowledge(kb_query, db=db) if kb_query else []
 
             rfp.requirements   = json.dumps(requirements)
             rfp.risks          = json.dumps(risks)

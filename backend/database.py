@@ -58,6 +58,7 @@ def init_db() -> None:
     from models.rfp import RFP                              # noqa: F401
     from models.feedback import Feedback                    # noqa: F401
     from models.knowledge_document import KnowledgeDocument # noqa: F401
+    from models.knowledge_chunk import KnowledgeChunk       # noqa: F401  ← 1.2
     from models.user import User                            # noqa: F401  ← auth
     Base.metadata.create_all(bind=engine)
     _migrate()
@@ -149,5 +150,18 @@ def _migrate() -> None:
             for col, definition in rfp_columns.items():
                 if col not in existing_rfp:
                     conn.execute(text(f"ALTER TABLE rfps ADD COLUMN {col} {definition}"))
+
+        # ── knowledge_documents table (1.2 additions) ─────────────────────────
+        if _table_exists(conn, "knowledge_documents"):
+            existing_kd = _get_existing_columns(conn, "knowledge_documents")
+            kd_columns: dict[str, str] = {
+                "embedding_status": "TEXT NOT NULL DEFAULT 'not_indexed'",
+                "chunk_count":      "INTEGER NOT NULL DEFAULT 0",
+            }
+            for col, definition in kd_columns.items():
+                if col not in existing_kd:
+                    conn.execute(
+                        text(f"ALTER TABLE knowledge_documents ADD COLUMN {col} {definition}")
+                    )
 
         conn.commit()

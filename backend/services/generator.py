@@ -68,16 +68,26 @@ Evaluation Criteria:
 
     # KB section: structured excerpts with attribution
     if knowledge_context:
+        # Determine dominant retrieval method for the header note
+        methods = {doc.get("retrieval_method", "keyword") for doc in knowledge_context}
+        if "semantic" in methods:
+            retrieval_note = "Retrieved by semantic (vector) search."
+        else:
+            retrieval_note = "Retrieved by keyword matching."
+
         doc_blocks = []
         for i, doc in enumerate(knowledge_context, start=1):
+            score = doc.get("relevance_score", 0)
+            method = doc.get("retrieval_method", "keyword")
+            score_label = f"{score:.4f}" if method == "semantic" else str(score)
             doc_blocks.append(
                 f"[KB-{i}] filename={doc['filename']}  id={doc['document_id']}"
-                f"  keyword_overlap={doc['relevance_score']}\n"
+                f"  retrieval={method}  score={score_label}\n"
                 f"  Excerpt: \"{doc['snippet'][:400]}\""
             )
         kb_section = (
             "\n\nINTERNAL KNOWLEDGE BASE — VERIFIED PAST WORK:\n"
-            "(Retrieved by keyword matching. Use only what is explicitly stated below.)\n\n"
+            f"({retrieval_note} Use only what is explicitly stated below.)\n\n"
             + "\n\n".join(doc_blocks)
         )
         kb_note = (

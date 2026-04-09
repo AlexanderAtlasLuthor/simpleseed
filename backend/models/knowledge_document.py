@@ -19,3 +19,9 @@ class KnowledgeDocument(Base):
     text_length        = Column(Integer, nullable=True)
     error_message      = Column(Text,    nullable=True)
     uploaded_at        = Column(DateTime, server_default=func.now())
+
+    # ── Vector indexing state (added in 1.2) ─────────────────────────────────
+    # "not_indexed" | "pending" | "completed" | "partial" | "failed"
+    embedding_status   = Column(String,  nullable=False, default="not_indexed")
+    # Number of chunks created; 0 until indexing completes.
+    chunk_count        = Column(Integer, nullable=False, default=0)
