@@ -8,6 +8,13 @@ import { apiFetch } from "../../../lib/api";
 
 type Tab = "requirements" | "proposal" | "score";
 
+interface FactorDetail {
+  score: number;
+  weight: number;
+  explanation: string;
+  evidence: string;
+}
+
 interface Analysis {
   id: string;
   filename: string;
@@ -18,6 +25,13 @@ interface Analysis {
     decision: string;
     breakdown: Record<string, number>;
     reasoning: string;
+    // 1.3 explainability (absent on pre-1.3 records)
+    factor_details?: Record<string, FactorDetail>;
+    strengths?: string[];
+    risks?: string[];
+    summary_explanation?: string;
+    confidence?: "high" | "medium" | "low";
+    missing_inputs?: string[];
   };
   created_at: string;
 }

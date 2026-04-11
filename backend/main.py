@@ -494,6 +494,8 @@ async def get_rfp(
     knowledge_refs = _safe_json_load(rfp.knowledge_refs, [])
     grounding = _safe_json_load(rfp.grounding_report, {})
     evidence_used = grounding.get("evidence_used", [])
+    # 1.3: load the explainable scoring payload (empty dict for pre-1.3 records)
+    _score_expl = _safe_json_load(getattr(rfp, "score_explanation", None) or "{}", {})
     return {
         "id": rfp.id,
         "filename": rfp.filename,
@@ -503,10 +505,18 @@ async def get_rfp(
         "strategic_fit": _safe_json_load(rfp.strategic_fit, {"status": "unknown"}),
         "proposal": rfp.proposal,
         "score": {
-            "score": rfp.score,
+            # Core (unchanged)
+            "score":    rfp.score,
             "decision": rfp.decision,
             "breakdown": _safe_json_load(rfp.score_breakdown, {}),
             "reasoning": rfp.reasoning,
+            # Explainability (1.3) — empty/absent for pre-1.3 records
+            "factor_details":      _score_expl.get("factor_details", {}),
+            "strengths":           _score_expl.get("strengths", []),
+            "risks":               _score_expl.get("risks", []),
+            "summary_explanation": _score_expl.get("summary_explanation", ""),
+            "confidence":          _score_expl.get("confidence", "medium"),
+            "missing_inputs":      _score_expl.get("missing_inputs", []),
         },
         "knowledge_results": knowledge_refs,
         "knowledge_used": [
@@ -913,11 +923,13 @@ async def _execute_pipeline_steps(
             else:
                 score_result = raw_score
 
-            rfp.score           = score_result["score"]
-            rfp.decision        = score_result["decision"]
-            rfp.score_breakdown = json.dumps(score_result["breakdown"])
-            rfp.reasoning       = score_result["reasoning"]
-            rfp.strategic_fit   = json.dumps(strategic_fit)
+            rfp.score             = score_result["score"]
+            rfp.decision          = score_result["decision"]
+            rfp.score_breakdown   = json.dumps(score_result["breakdown"])
+            rfp.reasoning         = score_result["reasoning"]
+            rfp.strategic_fit     = json.dumps(strategic_fit)
+            # 1.3: persist full explainable scoring payload
+            rfp.score_explanation = json.dumps(score_result)
             completed_steps.append("bid_scoring")
             rfp.pipeline_status = "completed"
             rfp.completed_steps = json.dumps(completed_steps)

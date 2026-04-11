@@ -154,6 +154,8 @@ def _migrate() -> None:
                 "pipeline_error":   "TEXT",
                 # user_id is nullable so pre-auth records are preserved
                 "user_id":          "TEXT",
+                # Explainable scoring payload (1.3) — JSON blob
+                "score_explanation": "TEXT DEFAULT '{}'",
             }
 
             for col, definition in rfp_columns.items():

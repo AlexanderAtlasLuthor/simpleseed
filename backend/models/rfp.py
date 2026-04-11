@@ -26,4 +26,9 @@ class RFP(Base):
     failed_step = Column(String, nullable=True)             # which step failed, if any
     completed_steps = Column(Text, default="[]")            # JSON list of step names
     pipeline_error = Column(Text, nullable=True)            # JSON {type, message}
+    # ── Explainable scoring (added in 1.3) ───────────────────────────────────
+    # Full scoring payload JSON: factor_details, strengths, risks,
+    # summary_explanation, confidence, missing_inputs, weights_used, etc.
+    # NULL for pre-1.3 records; callers should handle absent fields gracefully.
+    score_explanation = Column(Text, nullable=True, default="{}")
     created_at = Column(DateTime, server_default=func.now())
