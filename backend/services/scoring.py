@@ -194,11 +194,13 @@ def score_bid(requirements: dict | str, industry: Optional[str] = None) -> dict:
         "threshold_used": threshold,
         # ── Explainability (1.3) ──────────────────────────────────────────────
         "factor_details":      factor_details,
-        "strengths":           _safe_list(breakdown.get("strengths")),
-        "risks":               _safe_list(breakdown.get("risks")),
+        "strengths":           _safe_list(breakdown.get("strengths"))[:3],
+        "risks":               _safe_list(breakdown.get("risks"))[:3],
         "summary_explanation": str(breakdown.get("summary_explanation", "")),
         "confidence":          _safe_confidence(breakdown.get("confidence")),
-        "missing_inputs":      _safe_list(breakdown.get("missing_inputs")),
+        "missing_inputs":      _safe_list(breakdown.get("missing_inputs"))[:5],
+        # ── Scoring method (heuristic vs AI) ─────────────────────────────────
+        "scoring_method":      str(breakdown.get("scoring_method", "ai")),
     }
 
 
@@ -310,4 +312,5 @@ def _heuristic_score(text: str, industry_context: dict) -> dict:
             f"Heuristic score for a {vendor}. "
             "Add ANTHROPIC_API_KEY for AI-powered analysis."
         ),
+        "scoring_method": "heuristic",
     }

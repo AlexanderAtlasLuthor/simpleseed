@@ -517,6 +517,7 @@ async def get_rfp(
             "summary_explanation": _score_expl.get("summary_explanation", ""),
             "confidence":          _score_expl.get("confidence", "medium"),
             "missing_inputs":      _score_expl.get("missing_inputs", []),
+            "scoring_method":      _score_expl.get("scoring_method", "ai"),
         },
         "knowledge_results": knowledge_refs,
         "knowledge_used": [
@@ -912,24 +913,49 @@ async def _execute_pipeline_steps(
             raw_score     = score_bid(requirements, industry=resolved_industry)
 
             if strategic_fit.get("status") == "evaluated":
-                fit_score = strategic_fit["score"]
-                adjusted  = round(raw_score["score"] * (1 - sf_weight) + fit_score * sf_weight)
+                fit_score    = strategic_fit["score"]
+                adjusted     = round(raw_score["score"] * (1 - sf_weight) + fit_score * sf_weight)
+                new_decision = "BID" if adjusted >= bid_threshold else "NO BID"
+
+                # ── Fix C1: keep summary_explanation consistent with decision ──
+                # The LLM explanation was generated before strategic fit blending.
+                # If blending changed the decision, prepend a clear statement so
+                # the user never sees an explanation that contradicts the badge.
+                summary = raw_score.get("summary_explanation", "")
+                if new_decision != raw_score["decision"]:
+                    summary = (
+                        f"Strategic fit adjustment changed the recommendation from "
+                        f"{raw_score['decision']} to {new_decision} "
+                        f"(raw RFP score {raw_score['score']}, "
+                        f"strategic fit score {fit_score}, "
+                        f"adjusted score {adjusted}). {summary}"
+                    ).strip()
+
                 score_result = {
                     **raw_score,
-                    "score":    adjusted,
-                    "decision": "BID" if adjusted >= bid_threshold else "NO BID",
+                    "score":               adjusted,
+                    "decision":            new_decision,
+                    "summary_explanation": summary,
                     "strategic_fit_weight": sf_weight,
                 }
             else:
                 score_result = raw_score
 
-            rfp.score             = score_result["score"]
-            rfp.decision          = score_result["decision"]
-            rfp.score_breakdown   = json.dumps(score_result["breakdown"])
-            rfp.reasoning         = score_result["reasoning"]
-            rfp.strategic_fit     = json.dumps(strategic_fit)
-            # 1.3: persist full explainable scoring payload
-            rfp.score_explanation = json.dumps(score_result)
+            rfp.score           = score_result["score"]
+            rfp.decision        = score_result["decision"]
+            rfp.score_breakdown = json.dumps(score_result["breakdown"])
+            rfp.reasoning       = score_result["reasoning"]
+            rfp.strategic_fit   = json.dumps(strategic_fit)
+            # 1.3: persist only the explainability fields (Fix 3: no duplicate data)
+            rfp.score_explanation = json.dumps({
+                "factor_details":      score_result.get("factor_details", {}),
+                "strengths":           score_result.get("strengths", []),
+                "risks":               score_result.get("risks", []),
+                "summary_explanation": score_result.get("summary_explanation", ""),
+                "confidence":          score_result.get("confidence", "medium"),
+                "missing_inputs":      score_result.get("missing_inputs", []),
+                "scoring_method":      score_result.get("scoring_method", "ai"),
+            })
             completed_steps.append("bid_scoring")
             rfp.pipeline_status = "completed"
             rfp.completed_steps = json.dumps(completed_steps)
