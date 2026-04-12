@@ -58,6 +58,8 @@ def init_db() -> None:
     from models.rfp import RFP                              # noqa: F401
     from models.feedback import Feedback                    # noqa: F401
     from models.knowledge_document import KnowledgeDocument # noqa: F401
+    from models.llm_usage import LLMUsage                   # noqa: F401
+    from models.pipeline_run import PipelineRun             # noqa: F401
     Base.metadata.create_all(bind=engine)
     _migrate()
 
@@ -126,5 +128,19 @@ def _migrate() -> None:
         for col, definition in new_columns.items():
             if col not in existing:
                 conn.execute(text(f"ALTER TABLE rfps ADD COLUMN {col} {definition}"))
+
+        # ── feedback table: new observability columns ─────────────────────────
+        # Guard: only attempt if the table exists (create_all may have just made it)
+        try:
+            fb_existing = _get_existing_columns(conn, "feedback")
+            fb_new: dict[str, str] = {
+                "was_correct": "BOOLEAN",
+                "comment":     "TEXT",
+            }
+            for col, definition in fb_new.items():
+                if col not in fb_existing:
+                    conn.execute(text(f"ALTER TABLE feedback ADD COLUMN {col} {definition}"))
+        except Exception:
+            pass  # table may not exist yet on first run — create_all handles it
 
         conn.commit()

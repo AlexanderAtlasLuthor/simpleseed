@@ -16,8 +16,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-_client = None
-
 # ── Schema constraints ────────────────────────────────────────────────────────
 
 VALID_SEVERITIES = {"low", "medium", "high"}
@@ -125,11 +123,10 @@ def identify_risks(
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _get_client() -> anthropic.Anthropic:
-    global _client
-    if _client is None:
-        _client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
-    return _client
+def _get_client():
+    from services.observability import get_anthropic_client, set_service
+    set_service("risks")
+    return get_anthropic_client()
 
 
 def _is_valid(r: object) -> bool:

@@ -4,6 +4,7 @@ import { useParams, useRouter } from "next/navigation";
 import ScoreCard from "../../components/ScoreCard";
 import RequirementsView from "../../components/RequirementsView";
 import ProposalView from "../../components/ProposalView";
+import FeedbackPanel from "../../components/FeedbackPanel";
 
 type Tab = "requirements" | "proposal" | "score";
 
@@ -138,6 +139,9 @@ export default function AnalysisPage() {
         <RequirementsView requirements={data.requirements as Parameters<typeof RequirementsView>[0]["requirements"]} />
       )}
       {activeTab === "proposal" && <ProposalView proposal={data.proposal} />}
+
+      {/* Feedback panel — always visible below tabs */}
+      <FeedbackPanel rfpId={data.id} />
     </div>
   );
 }

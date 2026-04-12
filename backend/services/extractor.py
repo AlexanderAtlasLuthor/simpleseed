@@ -5,8 +5,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-_client = None
-
 # Documents within this limit are sent in a single LLM call.
 # 120k chars ≈ 30k tokens — well within Haiku's 200k-token context window.
 # Covers any RFP up to ~60 dense pages.
@@ -21,11 +19,10 @@ _VALID_STATUSES = {"complete", "partial", "ambiguous", "failed"}
 _VALID_CONFIDENCES = {"high", "medium", "low"}
 
 
-def get_client() -> anthropic.Anthropic:
-    global _client
-    if _client is None:
-        _client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
-    return _client
+def get_client():
+    from services.observability import get_anthropic_client, set_service
+    set_service("extractor")
+    return get_anthropic_client()
 
 
 def extract_requirements(text: str) -> dict:

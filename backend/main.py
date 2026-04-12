@@ -1,5 +1,7 @@
 import asyncio
 import json
+import os
+import time
 import uuid
 from typing import Optional
 from pathlib import Path
@@ -13,17 +15,36 @@ from config import MAX_FILE_BYTES
 from database import get_db, init_db
 from models.rfp import RFP
 from services.extractor import extract_requirements
-from services.feedback import get_all_feedback, get_feedback_for_rfp, get_feedback_summary, record_feedback
+from services.feedback import get_all_feedback, get_feedback_for_rfp, get_feedback_summary, record_feedback, upsert_feedback
 from services.knowledge import get_document, list_documents, search_knowledge, upload_document
 from services.fetcher import fetch_url_text
 from services.generator import generate_proposal
 from services.industry import SUPPORTED_INDUSTRIES, resolve_industry
+from services.observability import get_request_id, log_step, set_db_session, set_request_id
 from services.parser import parse_pdf
 from services.profile import evaluate_strategic_fit, load_profile, save_profile
 from services.risks import identify_risks
 from services.sam_gov import get_opportunity_text, search_opportunities
 from services.scoring import score_bid
 from services.scoring_config import load_scoring_config, save_scoring_config, validate_scoring_config
+
+# ── Sentry ────────────────────────────────────────────────────────────────────
+# Initialise only when SENTRY_DSN is configured; no-op otherwise.
+_SENTRY_DSN = os.getenv("SENTRY_DSN", "")
+if _SENTRY_DSN:
+    try:
+        import sentry_sdk
+        from sentry_sdk.integrations.fastapi import FastApiIntegration
+        from sentry_sdk.integrations.starlette import StarletteIntegration
+        sentry_sdk.init(
+            dsn=_SENTRY_DSN,
+            integrations=[StarletteIntegration(), FastApiIntegration()],
+            traces_sample_rate=0.1,
+            environment=os.getenv("APP_ENV", "development"),
+            release=os.getenv("APP_VERSION", "1.0.0"),
+        )
+    except ImportError:
+        pass  # sentry-sdk not installed — silently skip
 
 app = FastAPI(title="SimpleSeed API", version="1.0.0")
 
@@ -49,9 +70,18 @@ class SAMAnalyzeRequest(BaseModel):
 
 
 class FeedbackRequest(BaseModel):
-    outcome: str                       # "won" | "lost" | "no_bid"
+    outcome: str                       # "won" | "lost" | "no_bid" | "not_pursued"
     result_date: Optional[str] = None  # ISO date "YYYY-MM-DD"; defaults to today
     notes: Optional[str] = None
+    was_correct: Optional[bool] = None  # user: was the AI recommendation accurate?
+    comment: Optional[str] = None       # optional free-text from user
+
+
+class FeedbackUpsertRequest(BaseModel):
+    rfp_id: str
+    was_correct: Optional[bool] = None
+    outcome: Optional[str] = None      # "won" | "lost" | "no_bid" | "not_pursued"
+    comment: Optional[str] = None
 
 
 class ScoringConfigWeights(BaseModel):
@@ -138,11 +168,79 @@ async def add_feedback(
             outcome=body.outcome,
             result_date=body.result_date,
             notes=body.notes,
+            was_correct=body.was_correct,
+            comment=body.comment,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     from services.feedback import _serialize
     return _serialize(fb)
+
+
+@app.post("/api/feedback")
+async def upsert_rfp_feedback(body: FeedbackUpsertRequest, db: Session = Depends(get_db)):
+    """
+    Create or update feedback for an RFP (upsert by rfp_id).
+
+    Accepts was_correct, outcome, and comment independently — callers can
+    update just the correctness signal without providing an outcome, and
+    vice-versa.  A second call with the same rfp_id updates the existing row.
+    """
+    try:
+        fb = upsert_feedback(
+            db=db,
+            rfp_id=body.rfp_id,
+            was_correct=body.was_correct,
+            outcome=body.outcome,
+            comment=body.comment,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    from services.feedback import _serialize
+    return _serialize(fb)
+
+
+@app.get("/api/dashboard")
+async def get_dashboard(db: Session = Depends(get_db)):
+    """
+    Return simple aggregate metrics for the dashboard UI.
+
+    Metrics:
+      - total RFPs analyzed
+      - BID vs NO BID counts and percentage
+      - user agreement rate (correct_rate)
+      - win rate (where outcomes are recorded)
+      - override rate (user marked recommendation incorrect)
+    """
+    from models.feedback import Feedback
+
+    total_rfps  = db.query(RFP).count()
+    bid_count   = db.query(RFP).filter(RFP.decision == "BID").count()
+    no_bid_count = db.query(RFP).filter(RFP.decision == "NO BID").count()
+    bid_pct     = round(bid_count / total_rfps * 100) if total_rfps else 0
+
+    feedbacks   = db.query(Feedback).all()
+    total_fb    = len(feedbacks)
+
+    # correct_rate: fraction of rated responses the user agreed with
+    rated       = [f for f in feedbacks if f.was_correct is not None]
+    correct_rate  = round(sum(1 for f in rated if f.was_correct) / len(rated), 3) if rated else None
+    override_rate = round(sum(1 for f in rated if not f.was_correct) / len(rated), 3) if rated else None
+
+    # win_rate: fraction of submitted bids that were won
+    bid_outcomes  = [f for f in feedbacks if f.outcome in ("won", "lost")]
+    win_rate      = round(sum(1 for f in bid_outcomes if f.outcome == "won") / len(bid_outcomes), 3) if bid_outcomes else None
+
+    return {
+        "total_rfps":      total_rfps,
+        "bid_count":       bid_count,
+        "no_bid_count":    no_bid_count,
+        "bid_pct":         bid_pct,
+        "total_feedback":  total_fb,
+        "correct_rate":    correct_rate,
+        "override_rate":   override_rate,
+        "win_rate":        win_rate,
+    }
 
 
 @app.get("/api/rfps/{rfp_id}/feedback")
@@ -455,6 +553,23 @@ async def _run_analysis(
     resolved_industry = resolve_industry(industry)
     rfp_id = str(uuid.uuid4())
 
+    # ── Observability bootstrap ──────────────────────────────────────────────
+    request_id = str(uuid.uuid4())
+    set_request_id(request_id)
+    set_db_session(db)
+
+    # Attach request_id to Sentry scope if Sentry is active
+    if _SENTRY_DSN:
+        try:
+            import sentry_sdk
+            sentry_sdk.set_tag("request_id", request_id)
+            sentry_sdk.set_tag("rfp_id", rfp_id)
+        except Exception:
+            pass
+
+    log_step("pipeline", "started", metadata={"rfp_id": rfp_id, "filename": filename, "industry": resolved_industry})
+    pipeline_start = time.time()
+
     rfp = RFP(
         id=rfp_id,
         filename=filename,
@@ -479,13 +594,23 @@ async def _run_analysis(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Database error on record creation: {e}")
 
-    return await _execute_pipeline_steps(
+    result = await _execute_pipeline_steps(
         rfp=rfp, db=db, start_idx=0,
         completed_steps=[],
         requirements={}, risks=[], knowledge_results=[],
         proposal_text="", grounding_report={},
-        full_text=text,     # use full document text for initial extraction
+        full_text=text,
     )
+
+    _record_pipeline_run(
+        db=db,
+        request_id=request_id,
+        rfp_id=rfp_id,
+        status="failed" if result.get("status") == "partial_failure" else "success",
+        duration_ms=int((time.time() - pipeline_start) * 1000),
+    )
+    result["request_id"] = request_id
+    return result
 
 
 async def _resume_analysis(rfp: RFP, retry_from: str, db: Session) -> dict:
@@ -598,6 +723,7 @@ async def _execute_pipeline_steps(
                 db, rfp, completed_steps, "requirement_extraction",
                 ValueError("No text available for extraction (original_text is empty)."),
             )
+        t0 = time.time()
         try:
             requirements = await _llm_with_retry(extract_requirements, text_to_extract)
             risks = identify_risks(requirements, industry=resolved_industry)
@@ -614,11 +740,19 @@ async def _execute_pipeline_steps(
             completed_steps.append("requirement_extraction")
             rfp.completed_steps = json.dumps(completed_steps)
             db.commit()
+            log_step("requirement_extraction", "success",
+                     duration_ms=int((time.time() - t0) * 1000),
+                     metadata={"risk_count": len(risks), "kb_results": len(knowledge_results)})
         except Exception as exc:
+            log_step("requirement_extraction", "failed",
+                     duration_ms=int((time.time() - t0) * 1000),
+                     metadata={"error": str(exc)[:200]})
+            _capture_exception(exc)
             return _record_pipeline_failure(db, rfp, completed_steps, "requirement_extraction", exc)
 
     # ── Step 2: proposal generation ──────────────────────────────────────────
     if start_idx <= 1:
+        t0 = time.time()
         try:
             proposal_result = await _llm_with_retry(
                 generate_proposal,
@@ -638,11 +772,19 @@ async def _execute_pipeline_steps(
             completed_steps.append("proposal_generation")
             rfp.completed_steps   = json.dumps(completed_steps)
             db.commit()
+            log_step("proposal_generation", "success",
+                     duration_ms=int((time.time() - t0) * 1000),
+                     metadata={"evidence_count": len(grounding_report.get("evidence_used", []))})
         except Exception as exc:
+            log_step("proposal_generation", "failed",
+                     duration_ms=int((time.time() - t0) * 1000),
+                     metadata={"error": str(exc)[:200]})
+            _capture_exception(exc)
             return _record_pipeline_failure(db, rfp, completed_steps, "proposal_generation", exc)
 
     # ── Step 3: bid scoring + strategic fit ──────────────────────────────────
     if start_idx <= 2:
+        t0 = time.time()
         try:
             scoring_cfg   = load_scoring_config()
             sf_weight     = float(scoring_cfg["strategic_fit_weight"])
@@ -674,7 +816,14 @@ async def _execute_pipeline_steps(
             rfp.completed_steps = json.dumps(completed_steps)
             db.commit()
             db.refresh(rfp)
+            log_step("bid_scoring", "success",
+                     duration_ms=int((time.time() - t0) * 1000),
+                     metadata={"score": rfp.score, "decision": rfp.decision})
         except Exception as exc:
+            log_step("bid_scoring", "failed",
+                     duration_ms=int((time.time() - t0) * 1000),
+                     metadata={"error": str(exc)[:200]})
+            _capture_exception(exc)
             return _record_pipeline_failure(db, rfp, completed_steps, "bid_scoring", exc)
 
     # ── All executed steps completed ─────────────────────────────────────────
@@ -717,6 +866,47 @@ async def _execute_pipeline_steps(
 # ---------------------------------------------------------------------------
 # Pipeline helpers
 # ---------------------------------------------------------------------------
+
+def _capture_exception(exc: Exception) -> None:
+    """Send exception to Sentry if configured. Never raises."""
+    if not _SENTRY_DSN:
+        return
+    try:
+        import sentry_sdk
+        sentry_sdk.capture_exception(exc)
+    except Exception:
+        pass
+
+
+def _record_pipeline_run(
+    db: Session,
+    request_id: str,
+    rfp_id: str,
+    status: str,
+    duration_ms: int,
+) -> None:
+    """Persist a PipelineRun row. Never raises — must not break the pipeline."""
+    try:
+        from models.pipeline_run import PipelineRun
+        run = PipelineRun(
+            id=str(uuid.uuid4()),
+            request_id=request_id,
+            rfp_id=rfp_id,
+            user_id=None,   # populated when auth is wired up
+            status=status,
+            total_duration_ms=duration_ms,
+        )
+        db.add(run)
+        db.commit()
+        log_step("pipeline", status,
+                 duration_ms=duration_ms,
+                 metadata={"rfp_id": rfp_id})
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
 
 async def _llm_with_retry(fn, *args, max_retries: int = 1, retry_delay: float = 2.0, **kwargs):
     """

@@ -31,6 +31,9 @@ export default function Navbar() {
           <Link href="/knowledge" className={linkClass("/knowledge")}>
             Knowledge
           </Link>
+          <Link href="/dashboard" className={linkClass("/dashboard")}>
+            Dashboard
+          </Link>
         </div>
       </div>
     </nav>

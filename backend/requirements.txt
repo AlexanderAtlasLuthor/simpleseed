@@ -11,6 +11,8 @@ requests==2.32.3
 beautifulsoup4==4.12.3
 httpx==0.27.2
 psycopg2-binary>=2.9
+# Error tracking (optional — initialised only when SENTRY_DSN env var is set)
+sentry-sdk[fastapi]>=2.0.0
 # OCR fallback for scanned PDFs (requires: apt install tesseract-ocr poppler-utils)
 pytesseract==0.3.13
 pdf2image==1.17.0

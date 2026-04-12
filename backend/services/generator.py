@@ -6,14 +6,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-_client = None
-
-
-def get_client() -> anthropic.Anthropic:
-    global _client
-    if _client is None:
-        _client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
-    return _client
+def get_client():
+    from services.observability import get_anthropic_client, set_service
+    set_service("generator")
+    return get_anthropic_client()
 
 
 def _req_text(r) -> str:

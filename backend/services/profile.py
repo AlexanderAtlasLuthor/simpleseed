@@ -41,8 +41,6 @@ _DIM_WEIGHTS = {
 
 _VALID_OVERALL = {"high", "medium", "low"}
 
-_client = None
-
 
 # ── Profile I/O ───────────────────────────────────────────────────────────────
 
@@ -173,9 +171,9 @@ Return only valid JSON. No markdown."""
 
 
 def _evaluate_with_llm(req_text: str, profile: dict) -> dict:
-    global _client
-    if _client is None:
-        _client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+    from services.observability import get_anthropic_client, set_service
+    set_service("profile")
+    client = get_anthropic_client()
 
     profile_text = json.dumps(profile, indent=2)
     prompt = _FIT_PROMPT.format(
@@ -183,7 +181,7 @@ def _evaluate_with_llm(req_text: str, profile: dict) -> dict:
         rfp_text=req_text[:3000],
     )
 
-    message = _client.messages.create(
+    message = client.messages.create(
         model="claude-haiku-4-5-20251001",
         max_tokens=1200,
         messages=[{"role": "user", "content": prompt}],

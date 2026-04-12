@@ -33,7 +33,7 @@ from sqlalchemy.orm import Session
 from models.feedback import Feedback
 from models.rfp import RFP
 
-VALID_OUTCOMES = {"won", "lost", "no_bid"}
+VALID_OUTCOMES = {"won", "lost", "no_bid", "not_pursued"}
 
 # Minimum records needed before emitting calibration insights
 _MIN_CALIBRATION_RECORDS = 3
@@ -47,6 +47,8 @@ def record_feedback(
     outcome: str,
     result_date: Optional[str],
     notes: Optional[str],
+    was_correct: Optional[bool] = None,
+    comment: Optional[str] = None,
 ) -> Feedback:
     """
     Record a win/loss/no_bid outcome for a prior analysis.
@@ -102,6 +104,86 @@ def record_feedback(
         outcome               = outcome,
         result_date           = result_date,
         notes                 = notes,
+        was_correct           = was_correct,
+        comment               = comment,
+        original_score        = original_score,
+        original_decision     = original_decision,
+        industry              = industry,
+        strategic_fit_overall = strategic_fit_overall,
+        risk_count            = risk_count,
+        risk_summary          = risk_summary_json,
+    )
+    db.add(fb)
+    db.commit()
+    db.refresh(fb)
+    return fb
+
+
+def upsert_feedback(
+    db: Session,
+    rfp_id: str,
+    was_correct: Optional[bool] = None,
+    outcome: Optional[str] = None,
+    comment: Optional[str] = None,
+) -> Feedback:
+    """
+    Create or update the feedback record for an RFP.
+
+    One feedback row per rfp_id (most recent is updated).  Callers may
+    supply any combination of was_correct / outcome / comment — only
+    non-None values overwrite existing data.
+
+    Raises ValueError for invalid outcome values.
+    """
+    if outcome is not None and outcome not in VALID_OUTCOMES:
+        raise ValueError(
+            f"Invalid outcome '{outcome}'. Must be one of: {sorted(VALID_OUTCOMES)}"
+        )
+
+    existing: Optional[Feedback] = (
+        db.query(Feedback)
+        .filter(Feedback.rfp_id == rfp_id)
+        .order_by(Feedback.created_at.desc())
+        .first()
+    )
+
+    if existing:
+        if was_correct is not None:
+            existing.was_correct = was_correct
+        if outcome is not None:
+            existing.outcome = outcome
+        if comment is not None:
+            existing.comment = comment
+        db.commit()
+        db.refresh(existing)
+        return existing
+
+    # No existing record — create a snapshot from the RFP row
+    rfp: Optional[RFP] = db.query(RFP).filter(RFP.id == rfp_id).first()
+
+    original_score    = rfp.score    if rfp else None
+    original_decision = rfp.decision if rfp else None
+    industry          = rfp.industry if rfp else None
+    strategic_fit_overall = None
+    risk_count = None
+    risk_summary_json = None
+
+    if rfp:
+        sf = _safe_json(rfp.strategic_fit, {})
+        strategic_fit_overall = sf.get("overall")
+        risks = _safe_json(rfp.risks, [])
+        risk_count = len(risks)
+        risk_summary_json = json.dumps([
+            r.get("title", "") if isinstance(r, dict) else str(r) for r in risks
+        ])
+
+    fb = Feedback(
+        id                    = str(uuid.uuid4()),
+        rfp_id                = rfp_id,
+        outcome               = outcome,
+        result_date           = date.today().isoformat(),
+        was_correct           = was_correct,
+        comment               = comment,
         original_score        = original_score,
         original_decision     = original_decision,
         industry              = industry,
@@ -162,6 +244,8 @@ def get_feedback_summary(db: Session) -> dict:
             "losses": 0,
             "no_bids": 0,
             "win_rate_overall": None,
+            "correct_rate": None,
+            "override_rate": None,
             "win_rate_by_score_band": {},
             "win_rate_by_industry": {},
             "win_rate_by_strategic_fit": {},
@@ -174,11 +258,16 @@ def get_feedback_summary(db: Session) -> dict:
 
     wins    = sum(1 for r in rows if r.outcome == "won")
     losses  = sum(1 for r in rows if r.outcome == "lost")
-    no_bids = sum(1 for r in rows if r.outcome == "no_bid")
+    no_bids = sum(1 for r in rows if r.outcome in ("no_bid", "not_pursued"))
 
     # Only bids (won+lost) are used for win-rate calculations
     bid_rows = [r for r in rows if r.outcome in ("won", "lost")]
     win_rate_overall = _win_rate(bid_rows) if bid_rows else None
+
+    # User correctness signals
+    rated = [r for r in rows if r.was_correct is not None]
+    correct_rate  = round(sum(1 for r in rated if r.was_correct) / len(rated), 3) if rated else None
+    override_rate = round(sum(1 for r in rated if not r.was_correct) / len(rated), 3) if rated else None
 
     # ── Win rate by score band ────────────────────────────────────────────────
     bands = {
@@ -223,15 +312,17 @@ def get_feedback_summary(db: Session) -> dict:
     calibration = _compute_calibration(bid_rows, win_rate_by_score_band)
 
     return {
-        "total_feedback_records":  total,
-        "wins":    wins,
-        "losses":  losses,
-        "no_bids": no_bids,
-        "win_rate_overall": round(win_rate_overall, 3) if win_rate_overall is not None else None,
-        "win_rate_by_score_band":      win_rate_by_score_band,
-        "win_rate_by_industry":        win_rate_by_industry,
-        "win_rate_by_strategic_fit":   win_rate_by_strategic_fit,
-        "calibration_insight":         calibration,
+        "total_feedback_records":    total,
+        "wins":                      wins,
+        "losses":                    losses,
+        "no_bids":                   no_bids,
+        "win_rate_overall":          round(win_rate_overall, 3) if win_rate_overall is not None else None,
+        "correct_rate":              correct_rate,
+        "override_rate":             override_rate,
+        "win_rate_by_score_band":    win_rate_by_score_band,
+        "win_rate_by_industry":      win_rate_by_industry,
+        "win_rate_by_strategic_fit": win_rate_by_strategic_fit,
+        "calibration_insight":       calibration,
     }
 
 
@@ -322,16 +413,18 @@ def _safe_json(value, default):
 
 def _serialize(fb: Feedback) -> dict:
     return {
-        "id":                   fb.id,
-        "rfp_id":               fb.rfp_id,
-        "outcome":              fb.outcome,
-        "result_date":          fb.result_date,
-        "notes":                fb.notes,
-        "original_score":       fb.original_score,
-        "original_decision":    fb.original_decision,
-        "industry":             fb.industry,
+        "id":                    fb.id,
+        "rfp_id":                fb.rfp_id,
+        "outcome":               fb.outcome,
+        "result_date":           fb.result_date,
+        "notes":                 fb.notes,
+        "was_correct":           fb.was_correct,
+        "comment":               fb.comment,
+        "original_score":        fb.original_score,
+        "original_decision":     fb.original_decision,
+        "industry":              fb.industry,
         "strategic_fit_overall": fb.strategic_fit_overall,
-        "risk_count":           fb.risk_count,
-        "risk_summary":         _safe_json(fb.risk_summary, []),
-        "created_at":           fb.created_at.isoformat() if fb.created_at else None,
+        "risk_count":            fb.risk_count,
+        "risk_summary":          _safe_json(fb.risk_summary, []),
+        "created_at":            fb.created_at.isoformat() if fb.created_at else None,
     }
