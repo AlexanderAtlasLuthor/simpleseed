@@ -245,7 +245,6 @@ def get_feedback_summary(db: Session) -> dict:
             "no_bids": 0,
             "win_rate_overall": None,
             "correct_rate": None,
-            "override_rate": None,
             "win_rate_by_score_band": {},
             "win_rate_by_industry": {},
             "win_rate_by_strategic_fit": {},
@@ -266,8 +265,7 @@ def get_feedback_summary(db: Session) -> dict:
 
     # User correctness signals
     rated = [r for r in rows if r.was_correct is not None]
-    correct_rate  = round(sum(1 for r in rated if r.was_correct) / len(rated), 3) if rated else None
-    override_rate = round(sum(1 for r in rated if not r.was_correct) / len(rated), 3) if rated else None
+    correct_rate = round(sum(1 for r in rated if r.was_correct) / len(rated), 3) if rated else None
 
     # ── Win rate by score band ────────────────────────────────────────────────
     bands = {
@@ -318,7 +316,6 @@ def get_feedback_summary(db: Session) -> dict:
         "no_bids":                   no_bids,
         "win_rate_overall":          round(win_rate_overall, 3) if win_rate_overall is not None else None,
         "correct_rate":              correct_rate,
-        "override_rate":             override_rate,
         "win_rate_by_score_band":    win_rate_by_score_band,
         "win_rate_by_industry":      win_rate_by_industry,
         "win_rate_by_strategic_fit": win_rate_by_strategic_fit,

@@ -35,9 +35,6 @@ logger.setLevel(logging.INFO)
 _request_id_var: contextvars.ContextVar[str] = contextvars.ContextVar(
     "simpleseed_request_id", default=""
 )
-_db_session_var: contextvars.ContextVar = contextvars.ContextVar(
-    "simpleseed_db_session", default=None
-)
 _service_var: contextvars.ContextVar[str] = contextvars.ContextVar(
     "simpleseed_service", default="unknown"
 )
@@ -49,10 +46,6 @@ def get_request_id() -> str:
 
 def set_request_id(rid: str) -> None:
     _request_id_var.set(rid)
-
-
-def set_db_session(db) -> None:
-    _db_session_var.set(db)
 
 
 def set_service(name: str) -> None:
@@ -139,34 +132,38 @@ def _record_usage(
     request_id: str,
 ) -> None:
     """
-    Write one LLMUsage row.  Completely safe — never raises.
+    Write one LLMUsage row using an independent DB session.  Completely safe — never raises.
 
-    Requires a DB session to have been set via set_db_session() earlier in the
-    request lifecycle.  If not set, silently skips (graceful degradation).
+    Uses its own SessionLocal() so that a write failure cannot roll back or corrupt
+    the caller's pipeline session.
     """
-    db = _db_session_var.get()
-    if db is None:
-        return
     try:
+        from database import SessionLocal
         from models.llm_usage import LLMUsage  # local import avoids circular at module load
-        row = LLMUsage(
-            id=str(uuid.uuid4()),
-            request_id=request_id or None,
-            user_id=None,       # populated once auth is wired up
-            model=model,
-            service=service,
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            total_tokens=input_tokens + output_tokens,
-            estimated_cost=estimate_cost(model, input_tokens, output_tokens),
-        )
-        db.add(row)
-        db.commit()
-    except Exception:
+        db = SessionLocal()
         try:
-            db.rollback()
+            row = LLMUsage(
+                id=str(uuid.uuid4()),
+                request_id=request_id or None,
+                user_id=None,       # populated once auth is wired up
+                model=model,
+                service=service,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                total_tokens=input_tokens + output_tokens,
+                estimated_cost=estimate_cost(model, input_tokens, output_tokens),
+            )
+            db.add(row)
+            db.commit()
         except Exception:
-            pass
+            try:
+                db.rollback()
+            except Exception:
+                pass
+        finally:
+            db.close()
+    except Exception:
+        pass
 
 
 # ── Tracked Anthropic client ──────────────────────────────────────────────────
@@ -207,7 +204,7 @@ class _TrackedMessages:
                 request_id=rid,
             )
             log_step(
-                step=f"llm_call",
+                step="llm_call",
                 status="success",
                 duration_ms=elapsed_ms,
                 metadata={

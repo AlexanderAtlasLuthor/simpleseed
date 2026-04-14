@@ -20,7 +20,7 @@ from services.knowledge import get_document, list_documents, search_knowledge, u
 from services.fetcher import fetch_url_text
 from services.generator import generate_proposal
 from services.industry import SUPPORTED_INDUSTRIES, resolve_industry
-from services.observability import get_request_id, log_step, set_db_session, set_request_id
+from services.observability import get_request_id, log_step, set_request_id
 from services.parser import parse_pdf
 from services.profile import evaluate_strategic_fit, load_profile, save_profile
 from services.risks import identify_risks
@@ -210,7 +210,6 @@ async def get_dashboard(db: Session = Depends(get_db)):
       - BID vs NO BID counts and percentage
       - user agreement rate (correct_rate)
       - win rate (where outcomes are recorded)
-      - override rate (user marked recommendation incorrect)
     """
     from models.feedback import Feedback
 
@@ -223,23 +222,21 @@ async def get_dashboard(db: Session = Depends(get_db)):
     total_fb    = len(feedbacks)
 
     # correct_rate: fraction of rated responses the user agreed with
-    rated       = [f for f in feedbacks if f.was_correct is not None]
-    correct_rate  = round(sum(1 for f in rated if f.was_correct) / len(rated), 3) if rated else None
-    override_rate = round(sum(1 for f in rated if not f.was_correct) / len(rated), 3) if rated else None
+    rated        = [f for f in feedbacks if f.was_correct is not None]
+    correct_rate = round(sum(1 for f in rated if f.was_correct) / len(rated), 3) if rated else None
 
     # win_rate: fraction of submitted bids that were won
-    bid_outcomes  = [f for f in feedbacks if f.outcome in ("won", "lost")]
-    win_rate      = round(sum(1 for f in bid_outcomes if f.outcome == "won") / len(bid_outcomes), 3) if bid_outcomes else None
+    bid_outcomes = [f for f in feedbacks if f.outcome in ("won", "lost")]
+    win_rate     = round(sum(1 for f in bid_outcomes if f.outcome == "won") / len(bid_outcomes), 3) if bid_outcomes else None
 
     return {
-        "total_rfps":      total_rfps,
-        "bid_count":       bid_count,
-        "no_bid_count":    no_bid_count,
-        "bid_pct":         bid_pct,
-        "total_feedback":  total_fb,
-        "correct_rate":    correct_rate,
-        "override_rate":   override_rate,
-        "win_rate":        win_rate,
+        "total_rfps":     total_rfps,
+        "bid_count":      bid_count,
+        "no_bid_count":   no_bid_count,
+        "bid_pct":        bid_pct,
+        "total_feedback": total_fb,
+        "correct_rate":   correct_rate,
+        "win_rate":       win_rate,
     }
 
 
@@ -266,6 +263,43 @@ async def list_feedback(
 ):
     """Return recent feedback records across all analyses."""
     return get_all_feedback(db, limit=limit)
+
+
+@app.get("/api/usage/summary")
+async def usage_summary(db: Session = Depends(get_db)):
+    """
+    Return aggregate LLM token usage and cost statistics.
+
+    Breakdown is provided per service (extractor, generator, scoring, etc.)
+    alongside overall totals.
+    """
+    from models.llm_usage import LLMUsage
+    from sqlalchemy import func as sqlfunc
+
+    rows = db.query(LLMUsage).all()
+    total_calls        = len(rows)
+    total_input_tokens = sum(r.input_tokens  for r in rows)
+    total_output_tokens = sum(r.output_tokens for r in rows)
+    total_cost_usd     = round(sum(r.estimated_cost for r in rows), 6)
+
+    # Breakdown by service
+    by_service: dict = {}
+    for row in rows:
+        svc = row.service or "unknown"
+        if svc not in by_service:
+            by_service[svc] = {"calls": 0, "input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0}
+        by_service[svc]["calls"]         += 1
+        by_service[svc]["input_tokens"]  += row.input_tokens
+        by_service[svc]["output_tokens"] += row.output_tokens
+        by_service[svc]["cost_usd"]       = round(by_service[svc]["cost_usd"] + row.estimated_cost, 6)
+
+    return {
+        "total_calls":         total_calls,
+        "total_input_tokens":  total_input_tokens,
+        "total_output_tokens": total_output_tokens,
+        "total_cost_usd":      total_cost_usd,
+        "by_service":          by_service,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -556,7 +590,6 @@ async def _run_analysis(
     # ── Observability bootstrap ──────────────────────────────────────────────
     request_id = str(uuid.uuid4())
     set_request_id(request_id)
-    set_db_session(db)
 
     # Attach request_id to Sentry scope if Sentry is active
     if _SENTRY_DSN:
@@ -680,12 +713,36 @@ async def _resume_analysis(rfp: RFP, retry_from: str, db: Session) -> dict:
     rfp.completed_steps = json.dumps(completed_steps)
     db.commit()
 
+    # ── Observability bootstrap ──────────────────────────────────────────────
+    request_id = str(uuid.uuid4())
+    set_request_id(request_id)
+
+    if _SENTRY_DSN:
+        try:
+            import sentry_sdk
+            sentry_sdk.set_tag("request_id", request_id)
+            sentry_sdk.set_tag("rfp_id", rfp.id)
+        except Exception:
+            pass
+
+    log_step("pipeline", "started", metadata={"rfp_id": rfp.id, "retry_from": retry_from})
+    pipeline_start = time.time()
+
     result = await _execute_pipeline_steps(
         rfp=rfp, db=db, start_idx=start_idx,
         completed_steps=completed_steps,
         requirements=requirements, risks=risks, knowledge_results=knowledge_results,
         proposal_text=proposal_text, grounding_report=grounding_report,
     )
+
+    _record_pipeline_run(
+        db=db,
+        request_id=request_id,
+        rfp_id=rfp.id,
+        status="failed" if result.get("status") == "partial_failure" else "success",
+        duration_ms=int((time.time() - pipeline_start) * 1000),
+    )
+    result["request_id"] = request_id
 
     # Attach retry metadata to the response
     result["retried_from"] = retry_from

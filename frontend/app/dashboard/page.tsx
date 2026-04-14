@@ -9,7 +9,6 @@ interface DashboardData {
   bid_pct: number;
   total_feedback: number;
   correct_rate: number | null;
-  override_rate: number | null;
   win_rate: number | null;
 }
 
@@ -126,17 +125,12 @@ export default function DashboardPage() {
         <h2 className="text-xs text-[#6b8f72] uppercase tracking-widest mb-3">
           User Signals
         </h2>
-        <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+        <div className="grid grid-cols-2 sm:grid-cols-2 gap-3">
           <StatCard
             label="Agreement rate"
             value={pct(data.correct_rate)}
             sub="User marked recommendation correct"
             accent={data.correct_rate !== null}
-          />
-          <StatCard
-            label="Override rate"
-            value={pct(data.override_rate)}
-            sub="User marked recommendation incorrect"
           />
           <StatCard
             label="Win rate"

@@ -6,6 +6,7 @@ Requires:  pip install pytest
 
 All tests use an in-memory SQLite DB — no external dependencies needed.
 """
+import json
 import sys
 import os
 
@@ -163,7 +164,7 @@ class TestFeedbackSummary:
         assert s["total_feedback_records"] == 0
         assert s["win_rate_overall"] is None
         assert s["correct_rate"] is None
-        assert s["override_rate"] is None
+        assert "override_rate" not in s
 
     def test_win_rate_computed(self, db, rfp):
         record_feedback(db, rfp.id, "won",  None, None)
@@ -180,14 +181,14 @@ class TestFeedbackSummary:
         record_feedback(db, rfp.id, "lost", None, None, was_correct=False)
         s = get_feedback_summary(db)
         assert s["correct_rate"] == pytest.approx(2 / 3, abs=0.01)
-        assert s["override_rate"] == pytest.approx(1 / 3, abs=0.01)
+        assert "override_rate" not in s
 
-    def test_override_rate_is_one_when_all_incorrect(self, db, rfp):
+    def test_all_incorrect_correct_rate_zero(self, db, rfp):
         record_feedback(db, rfp.id, "lost", None, None, was_correct=False)
         record_feedback(db, rfp.id, "lost", None, None, was_correct=False)
         s = get_feedback_summary(db)
-        assert s["override_rate"] == 1.0
         assert s["correct_rate"] == 0.0
+        assert "override_rate" not in s
 
     def test_no_bids_excluded_from_win_rate(self, db, rfp):
         record_feedback(db, rfp.id, "no_bid", None, None)
@@ -260,3 +261,184 @@ class TestPipelineRun:
         assert fetched.status == "success"
         assert fetched.total_duration_ms == 3412
         assert fetched.request_id == "req-xyz"
+
+
+# ── Override rate removed ─────────────────────────────────────────────────────
+
+class TestOverrideRateRemoved:
+    """Regression: override_rate must not appear anywhere in summary output."""
+
+    def test_override_rate_absent_empty(self, db):
+        s = get_feedback_summary(db)
+        assert "override_rate" not in s
+
+    def test_override_rate_absent_populated(self, db, rfp):
+        record_feedback(db, rfp.id, "won", None, None, was_correct=True)
+        record_feedback(db, rfp.id, "lost", None, None, was_correct=False)
+        s = get_feedback_summary(db)
+        assert "override_rate" not in s
+
+
+# ── Usage session isolation ───────────────────────────────────────────────────
+
+class TestUsageSessionIsolation:
+    """Regression: _record_usage must use its own session, not the pipeline session."""
+
+    def test_set_db_session_not_exported(self):
+        """set_db_session must no longer exist in the observability module."""
+        import services.observability as obs
+        assert not hasattr(obs, "set_db_session"), (
+            "set_db_session still exported — C2 fix not applied"
+        )
+
+    def test_db_session_var_not_exported(self):
+        """_db_session_var must no longer exist in the observability module."""
+        import services.observability as obs
+        assert not hasattr(obs, "_db_session_var"), (
+            "_db_session_var still present — C2 fix not applied"
+        )
+
+    def test_record_usage_silent_without_db(self):
+        """_record_usage must not raise even when SessionLocal would fail."""
+        from unittest.mock import patch, MagicMock
+        import services.observability as obs
+
+        # Simulate a broken SessionLocal — should be completely swallowed
+        broken_session = MagicMock()
+        broken_session.add.side_effect = RuntimeError("DB unavailable")
+        broken_session.rollback.return_value = None
+
+        with patch("database.SessionLocal", return_value=broken_session):
+            # Must not raise
+            obs._record_usage(
+                model="claude-haiku-4-5-20251001",
+                service="extractor",
+                input_tokens=100,
+                output_tokens=50,
+                request_id="test-req",
+            )
+
+    def test_pipeline_session_unaffected_by_usage_failure(self, db, rfp):
+        """
+        A failure inside _record_usage must not roll back the pipeline session.
+        Specifically: we write to the pipeline session (add feedback), then
+        trigger a usage write error, then verify the feedback row is still there.
+        """
+        from unittest.mock import patch, MagicMock
+        import services.observability as obs
+
+        # Write something to the pipeline session
+        from models.feedback import Feedback
+        import uuid
+        fb = Feedback(
+            id=str(uuid.uuid4()),
+            rfp_id=rfp.id,
+            outcome="won",
+            result_date="2026-01-01",
+        )
+        db.add(fb)
+        db.commit()
+
+        # Now simulate a usage write error (broken independent session)
+        broken_session = MagicMock()
+        broken_session.add.side_effect = RuntimeError("usage DB error")
+        broken_session.rollback.return_value = None
+
+        with patch("database.SessionLocal", return_value=broken_session):
+            obs._record_usage(
+                model="claude-haiku-4-5-20251001",
+                service="test",
+                input_tokens=10,
+                output_tokens=5,
+                request_id="r",
+            )
+
+        # Pipeline session data must be intact
+        assert db.query(Feedback).filter_by(rfp_id=rfp.id).count() == 1
+
+
+# ── Retry observability ───────────────────────────────────────────────────────
+
+def _get_resume_analysis_source() -> str:
+    """Extract _resume_analysis source from main.py without importing it."""
+    main_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "main.py")
+    with open(main_path) as f:
+        content = f.read()
+    # Slice out just the _resume_analysis function body
+    start = content.find("async def _resume_analysis(")
+    assert start != -1, "Could not find _resume_analysis in main.py"
+    # Find the next top-level async/def after it
+    next_fn = content.find("\nasync def ", start + 1)
+    next_fn2 = content.find("\ndef ", start + 1)
+    end = min(x for x in [next_fn, next_fn2] if x != -1)
+    return content[start:end]
+
+
+class TestRetryObservability:
+    """Structural regression: _resume_analysis must bootstrap observability."""
+
+    def test_resume_analysis_source_sets_request_id(self):
+        """_resume_analysis must call set_request_id before _execute_pipeline_steps."""
+        source = _get_resume_analysis_source()
+        assert "set_request_id" in source, (
+            "_resume_analysis does not call set_request_id — C1 fix not applied"
+        )
+
+    def test_resume_analysis_source_records_pipeline_run(self):
+        """_resume_analysis must call _record_pipeline_run."""
+        source = _get_resume_analysis_source()
+        assert "_record_pipeline_run" in source, (
+            "_resume_analysis does not call _record_pipeline_run — C1 fix not applied"
+        )
+
+    def test_resume_analysis_source_returns_request_id(self):
+        """_resume_analysis must include request_id in the result."""
+        source = _get_resume_analysis_source()
+        assert 'result["request_id"]' in source, (
+            "_resume_analysis does not set result['request_id'] — C1 fix not applied"
+        )
+
+
+# ── log_step shape ────────────────────────────────────────────────────────────
+
+class TestLogStep:
+    """log_step must emit valid JSON with the required keys."""
+
+    def test_log_step_emits_json(self, caplog):
+        import logging
+        from services.observability import log_step, set_request_id
+
+        set_request_id("test-req-123")
+        with caplog.at_level(logging.INFO, logger="simpleseed"):
+            log_step("requirement_extraction", "success", duration_ms=42, metadata={"items": 3})
+
+        # Find the log record from our logger
+        records = [r for r in caplog.records if r.name == "simpleseed"]
+        assert records, "No log record emitted by log_step"
+        payload = json.loads(records[-1].message)
+        assert payload["request_id"] == "test-req-123"
+        assert payload["step"] == "requirement_extraction"
+        assert payload["status"] == "success"
+        assert payload["duration_ms"] == 42
+        assert payload["metadata"] == {"items": 3}
+
+    def test_log_step_required_keys_always_present(self, caplog):
+        import logging
+        from services.observability import log_step, set_request_id
+
+        set_request_id("")
+        with caplog.at_level(logging.INFO, logger="simpleseed"):
+            log_step("pipeline", "started")
+
+        records = [r for r in caplog.records if r.name == "simpleseed"]
+        assert records
+        payload = json.loads(records[-1].message)
+        assert "request_id" in payload
+        assert "step" in payload
+        assert "status" in payload
+
+    def test_log_step_never_raises(self):
+        """log_step must absorb all exceptions and never propagate them."""
+        from services.observability import log_step
+        # Pass a non-serialisable object — must not raise
+        log_step("x", "y", metadata={"bad": object()})  # noqa: S101
