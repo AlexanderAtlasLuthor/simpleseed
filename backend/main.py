@@ -600,7 +600,7 @@ async def _execute_pipeline_steps(
             )
         try:
             requirements = await _llm_with_retry(extract_requirements, text_to_extract)
-            risks = identify_risks(requirements, industry=resolved_industry)
+            risks = await identify_risks(requirements, industry=resolved_industry)
 
             kb_query_parts = list(requirements.get("keywords") or [])
             if requirements.get("summary"):
@@ -649,8 +649,8 @@ async def _execute_pipeline_steps(
             bid_threshold = float(scoring_cfg["bid_threshold"])
 
             profile       = load_profile()
-            strategic_fit = evaluate_strategic_fit(requirements, profile)
-            raw_score     = score_bid(requirements, industry=resolved_industry)
+            strategic_fit = await evaluate_strategic_fit(requirements, profile)
+            raw_score     = await score_bid(requirements, industry=resolved_industry)
 
             if strategic_fit.get("status") == "evaluated":
                 fit_score = strategic_fit["score"]
@@ -720,13 +720,14 @@ async def _execute_pipeline_steps(
 
 async def _llm_with_retry(fn, *args, max_retries: int = 1, retry_delay: float = 2.0, **kwargs):
     """
-    Call fn(*args, **kwargs), retrying once after a delay on any exception.
+    Await fn(*args, **kwargs), retrying once after a delay on any exception.
     Covers transient LLM errors (timeouts, rate limits, connection drops).
+    fn must be an async callable — all LLM service functions are async.
     """
     last_exc: Exception | None = None
     for attempt in range(max_retries + 1):
         try:
-            return fn(*args, **kwargs)
+            return await fn(*args, **kwargs)
         except Exception as exc:
             last_exc = exc
             if attempt < max_retries:

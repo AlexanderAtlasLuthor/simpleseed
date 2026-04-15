@@ -83,7 +83,7 @@ Return only valid JSON. No markdown, no explanation outside the JSON."""
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-def identify_risks(
+async def identify_risks(
     requirements: dict | str, industry: Optional[str] = None
 ) -> list[dict]:
     """
@@ -104,7 +104,7 @@ def identify_risks(
     )
 
     try:
-        message = _get_client().messages.create(
+        message = await _get_client().messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=1500,
             messages=[{"role": "user", "content": prompt}],
@@ -125,10 +125,10 @@ def identify_risks(
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _get_client() -> anthropic.Anthropic:
+def _get_client() -> anthropic.AsyncAnthropic:
     global _client
     if _client is None:
-        _client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+        _client = anthropic.AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
     return _client
 
 

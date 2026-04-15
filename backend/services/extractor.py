@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import anthropic
@@ -21,27 +22,27 @@ _VALID_STATUSES = {"complete", "partial", "ambiguous", "failed"}
 _VALID_CONFIDENCES = {"high", "medium", "low"}
 
 
-def get_client() -> anthropic.Anthropic:
+def get_client() -> anthropic.AsyncAnthropic:
     global _client
     if _client is None:
-        _client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+        _client = anthropic.AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
     return _client
 
 
-def extract_requirements(text: str) -> dict:
+async def extract_requirements(text: str) -> dict:
     """
     Extract structured requirements from RFP text.
 
     Strategy:
     - text ≤ 120,000 chars → single LLM call with full text
-    - text  > 120,000 chars → map-reduce: chunk → extract each → merge
+    - text  > 120,000 chars → map-reduce: chunk → extract each (parallel) → merge
 
     Always returns a dict with extraction_status, confidence, and notes
     so callers can distinguish complete / partial / ambiguous / failed.
     """
     if len(text) <= _SINGLE_PASS_LIMIT:
-        return _extract_single(text)
-    return _extract_chunked(text)
+        return await _extract_single(text)
+    return await _extract_chunked(text)
 
 
 # ---------------------------------------------------------------------------
@@ -116,10 +117,10 @@ Return only valid JSON. No markdown, no extra text."""
 # Single-pass extraction (one LLM call, full text)
 # ---------------------------------------------------------------------------
 
-def _extract_single(text: str) -> dict:
+async def _extract_single(text: str) -> dict:
     prompt = _EXTRACTION_PROMPT.format(text=text)
 
-    message = get_client().messages.create(
+    message = await get_client().messages.create(
         model="claude-haiku-4-5-20251001",
         max_tokens=2500,
         messages=[{"role": "user", "content": prompt}],
@@ -133,10 +134,10 @@ def _extract_single(text: str) -> dict:
         return _enrich_result(result)
     except Exception:
         # First parse failed — attempt a rescue extraction before giving up.
-        return _rescue_extract(text, content)
+        return await _rescue_extract(text, content)
 
 
-def _rescue_extract(text: str, failed_content: str) -> dict:
+async def _rescue_extract(text: str, failed_content: str) -> dict:
     """
     Second-chance extraction when the primary parse fails.
     Uses a simpler prompt focused on recovering partial signal.
@@ -163,7 +164,7 @@ DOCUMENT (first 8000 chars):
 Return only valid JSON. No markdown."""
 
     try:
-        message = get_client().messages.create(
+        message = await get_client().messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=800,
             messages=[{"role": "user", "content": rescue_prompt}],
@@ -195,10 +196,11 @@ Return only valid JSON. No markdown."""
 # Map-reduce for very large documents (> 120k chars)
 # ---------------------------------------------------------------------------
 
-def _extract_chunked(text: str) -> dict:
+async def _extract_chunked(text: str) -> dict:
     chunks = _split_into_chunks(text)
-    partials = [_extract_single(chunk) for chunk in chunks]
-    return _merge_extractions(partials)
+    # Process chunks in parallel — each is independent, order preserved by gather.
+    partials = await asyncio.gather(*[_extract_single(chunk) for chunk in chunks])
+    return _merge_extractions(list(partials))
 
 
 def _split_into_chunks(text: str) -> list[str]:

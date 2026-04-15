@@ -78,7 +78,7 @@ def is_configured() -> bool:
 
 # ── Strategic fit evaluation ──────────────────────────────────────────────────
 
-def evaluate_strategic_fit(
+async def evaluate_strategic_fit(
     requirements: dict | str,
     profile: Optional[dict],
 ) -> dict:
@@ -106,7 +106,7 @@ def evaluate_strategic_fit(
     )
 
     try:
-        result = _evaluate_with_llm(req_text, profile)
+        result = await _evaluate_with_llm(req_text, profile)
         return _build_result(result, profile["company_name"])
     except Exception:
         result = _evaluate_heuristic(req_dict, profile)
@@ -172,10 +172,10 @@ SCORING RULES:
 Return only valid JSON. No markdown."""
 
 
-def _evaluate_with_llm(req_text: str, profile: dict) -> dict:
+async def _evaluate_with_llm(req_text: str, profile: dict) -> dict:
     global _client
     if _client is None:
-        _client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+        _client = anthropic.AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
     profile_text = json.dumps(profile, indent=2)
     prompt = _FIT_PROMPT.format(
@@ -183,7 +183,7 @@ def _evaluate_with_llm(req_text: str, profile: dict) -> dict:
         rfp_text=req_text[:3000],
     )
 
-    message = _client.messages.create(
+    message = await _client.messages.create(
         model="claude-haiku-4-5-20251001",
         max_tokens=1200,
         messages=[{"role": "user", "content": prompt}],

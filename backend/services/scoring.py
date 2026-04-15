@@ -9,14 +9,14 @@ load_dotenv()
 _client = None
 
 
-def get_client() -> anthropic.Anthropic:
+def get_client() -> anthropic.AsyncAnthropic:
     global _client
     if _client is None:
-        _client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+        _client = anthropic.AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
     return _client
 
 
-def score_bid(requirements: dict | str, industry: Optional[str] = None) -> dict:
+async def score_bid(requirements: dict | str, industry: Optional[str] = None) -> dict:
     from services.industry import get_industry_context
     from services.scoring_config import load_scoring_config
 
@@ -60,7 +60,7 @@ Return a JSON object with exactly these fields:
 Return only valid JSON. No markdown."""
 
     try:
-        message = get_client().messages.create(
+        message = await get_client().messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=400,
             messages=[{"role": "user", "content": prompt}],

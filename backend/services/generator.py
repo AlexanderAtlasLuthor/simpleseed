@@ -9,10 +9,10 @@ load_dotenv()
 _client = None
 
 
-def get_client() -> anthropic.Anthropic:
+def get_client() -> anthropic.AsyncAnthropic:
     global _client
     if _client is None:
-        _client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+        _client = anthropic.AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
     return _client
 
 
@@ -21,7 +21,7 @@ def _req_text(r) -> str:
     return r["text"] if isinstance(r, dict) else str(r)
 
 
-def generate_proposal(
+async def generate_proposal(
     requirements: dict | str,
     industry: Optional[str] = None,
     knowledge_context: list | None = None,
@@ -162,7 +162,7 @@ Be honest — this is used to audit proposal quality.
 
 Write the full proposal now, followed by the grounding JSON:"""
 
-    message = get_client().messages.create(
+    message = await get_client().messages.create(
         model="claude-haiku-4-5-20251001",
         max_tokens=3500,
         messages=[{"role": "user", "content": prompt}],
