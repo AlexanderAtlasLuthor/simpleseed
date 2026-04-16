@@ -18,6 +18,7 @@ File size limit  → MAX_FILE_BYTES from config (same as RFP upload)
 """
 import uuid
 from pathlib import Path
+from typing import Optional
 
 from sqlalchemy.orm import Session
 
@@ -60,6 +61,7 @@ def upload_document(
     filename: str,
     content_type: str,
     file_bytes: bytes,
+    org_id: Optional[str] = None,
 ) -> KnowledgeDocument:
     """
     Validate, extract text, persist file, and create a DB metadata record.
@@ -79,6 +81,7 @@ def upload_document(
         content_type     = _normalise_content_type(filename, content_type),
         source           = "internal_upload",
         processing_status = "pending",
+        org_id           = org_id,
     )
     db.add(doc)
     db.commit()
@@ -101,18 +104,24 @@ def upload_document(
     return doc
 
 
-def list_documents(db: Session) -> list[dict]:
+def list_documents(
+    db: Session, org_id: Optional[str] = None
+) -> list[dict]:
     """Return all knowledge documents ordered by upload date, newest first."""
-    rows = (
-        db.query(KnowledgeDocument)
-        .order_by(KnowledgeDocument.uploaded_at.desc())
-        .all()
-    )
+    q = db.query(KnowledgeDocument)
+    if org_id is not None:
+        q = q.filter(KnowledgeDocument.org_id == org_id)
+    rows = q.order_by(KnowledgeDocument.uploaded_at.desc()).all()
     return [_serialize(r) for r in rows]
 
 
-def get_document(db: Session, doc_id: str) -> dict | None:
-    row = db.query(KnowledgeDocument).filter(KnowledgeDocument.id == doc_id).first()
+def get_document(
+    db: Session, doc_id: str, org_id: Optional[str] = None
+) -> dict | None:
+    q = db.query(KnowledgeDocument).filter(KnowledgeDocument.id == doc_id)
+    if org_id is not None:
+        q = q.filter(KnowledgeDocument.org_id == org_id)
+    row = q.first()
     return _serialize(row) if row else None
 
 

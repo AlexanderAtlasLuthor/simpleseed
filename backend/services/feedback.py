@@ -47,6 +47,7 @@ def record_feedback(
     outcome: str,
     result_date: Optional[str],
     notes: Optional[str],
+    org_id: Optional[str] = None,
 ) -> Feedback:
     """
     Record a win/loss/no_bid outcome for a prior analysis.
@@ -99,6 +100,7 @@ def record_feedback(
     fb = Feedback(
         id                    = str(uuid.uuid4()),
         rfp_id                = rfp_id,
+        org_id                = org_id,
         outcome               = outcome,
         result_date           = result_date,
         notes                 = notes,
@@ -117,29 +119,29 @@ def record_feedback(
 
 # ── Read ──────────────────────────────────────────────────────────────────────
 
-def get_feedback_for_rfp(db: Session, rfp_id: str) -> list[dict]:
+def get_feedback_for_rfp(
+    db: Session, rfp_id: str, org_id: Optional[str] = None
+) -> list[dict]:
     """Return all feedback records linked to a specific RFP analysis."""
-    rows = (
-        db.query(Feedback)
-        .filter(Feedback.rfp_id == rfp_id)
-        .order_by(Feedback.created_at.desc())
-        .all()
-    )
+    q = db.query(Feedback).filter(Feedback.rfp_id == rfp_id)
+    if org_id is not None:
+        q = q.filter(Feedback.org_id == org_id)
+    rows = q.order_by(Feedback.created_at.desc()).all()
     return [_serialize(fb) for fb in rows]
 
 
-def get_all_feedback(db: Session, limit: int = 200) -> list[dict]:
+def get_all_feedback(
+    db: Session, limit: int = 200, org_id: Optional[str] = None
+) -> list[dict]:
     """Return the most recent feedback records across all analyses."""
-    rows = (
-        db.query(Feedback)
-        .order_by(Feedback.created_at.desc())
-        .limit(limit)
-        .all()
-    )
+    q = db.query(Feedback)
+    if org_id is not None:
+        q = q.filter(Feedback.org_id == org_id)
+    rows = q.order_by(Feedback.created_at.desc()).limit(limit).all()
     return [_serialize(fb) for fb in rows]
 
 
-def get_feedback_summary(db: Session) -> dict:
+def get_feedback_summary(db: Session, org_id: Optional[str] = None) -> dict:
     """
     Compute aggregate metrics from all feedback records.
 
@@ -152,7 +154,10 @@ def get_feedback_summary(db: Session) -> dict:
 
     All values are derived from observed data. No interpolation or prediction.
     """
-    rows = db.query(Feedback).all()
+    q = db.query(Feedback)
+    if org_id is not None:
+        q = q.filter(Feedback.org_id == org_id)
+    rows = q.all()
     total = len(rows)
 
     if total == 0:

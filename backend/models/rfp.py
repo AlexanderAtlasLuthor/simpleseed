@@ -7,6 +7,7 @@ class RFP(Base):
     __tablename__ = "rfps"
 
     id = Column(String, primary_key=True)
+    org_id = Column(String, nullable=True, index=True)   # set on creation; nullable for legacy rows
     filename = Column(String, nullable=False)
     original_text = Column(Text)
     requirements = Column(Text)

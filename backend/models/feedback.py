@@ -14,6 +14,7 @@ class Feedback(Base):
     __tablename__ = "feedback"
 
     id                   = Column(String,   primary_key=True)
+    org_id               = Column(String,   nullable=True, index=True)  # organisation scope
     rfp_id               = Column(String,   nullable=True, index=True)  # FK to rfps.id, nullable for resilience
     outcome              = Column(String,   nullable=False)              # "won" | "lost" | "no_bid"
     result_date          = Column(String,   nullable=False)              # ISO date string "YYYY-MM-DD"

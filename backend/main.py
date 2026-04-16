@@ -12,6 +12,9 @@ from sqlalchemy.orm import Session
 from config import MAX_FILE_BYTES
 from database import get_db, init_db
 from models.rfp import RFP
+from models.user import User
+from routers.auth import router as auth_router
+from services.auth import get_current_user
 from services.extractor import extract_requirements
 from services.feedback import get_all_feedback, get_feedback_for_rfp, get_feedback_summary, record_feedback
 from services.knowledge import get_document, list_documents, search_knowledge, upload_document
@@ -81,6 +84,9 @@ class CompanyProfileRequest(BaseModel):
     capacity_constraints: list[str] = []
 
 
+app.include_router(auth_router)
+
+
 @app.on_event("startup")
 async def startup():
     init_db()
@@ -128,9 +134,16 @@ async def update_profile(body: CompanyProfileRequest):
 
 @app.post("/api/rfps/{rfp_id}/feedback")
 async def add_feedback(
-    rfp_id: str, body: FeedbackRequest, db: Session = Depends(get_db)
+    rfp_id: str,
+    body: FeedbackRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """Record a win/loss/no_bid outcome for a completed analysis."""
+    # Verify the RFP belongs to the user's organisation
+    rfp = db.query(RFP).filter(RFP.id == rfp_id, RFP.org_id == current_user.org_id).first()
+    if not rfp:
+        raise HTTPException(status_code=404, detail="RFP not found")
     try:
         fb = record_feedback(
             db=db,
@@ -138,6 +151,7 @@ async def add_feedback(
             outcome=body.outcome,
             result_date=body.result_date,
             notes=body.notes,
+            org_id=current_user.org_id,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
@@ -146,28 +160,40 @@ async def add_feedback(
 
 
 @app.get("/api/rfps/{rfp_id}/feedback")
-async def list_rfp_feedback(rfp_id: str, db: Session = Depends(get_db)):
+async def list_rfp_feedback(
+    rfp_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     """Return all feedback records for a specific analysis."""
-    return get_feedback_for_rfp(db, rfp_id)
+    # Verify the RFP belongs to this org before returning its feedback
+    rfp = db.query(RFP).filter(RFP.id == rfp_id, RFP.org_id == current_user.org_id).first()
+    if not rfp:
+        raise HTTPException(status_code=404, detail="RFP not found")
+    return get_feedback_for_rfp(db, rfp_id, org_id=current_user.org_id)
 
 
 @app.get("/api/feedback/summary")
-async def feedback_summary(db: Session = Depends(get_db)):
+async def feedback_summary(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     """
     Return aggregate win/loss metrics and a threshold calibration insight.
     This is the first concrete use of historical feedback data in the MVP.
     Win rates are computed from observed outcomes only — no prediction or ML.
     """
-    return get_feedback_summary(db)
+    return get_feedback_summary(db, org_id=current_user.org_id)
 
 
 @app.get("/api/feedback")
 async def list_feedback(
     limit: int = Query(default=200, ge=1, le=1000),
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """Return recent feedback records across all analyses."""
-    return get_all_feedback(db, limit=limit)
+    return get_all_feedback(db, limit=limit, org_id=current_user.org_id)
 
 
 # ---------------------------------------------------------------------------
@@ -178,6 +204,7 @@ async def list_feedback(
 async def upload_knowledge_document(
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """
     Upload a PDF or plain-text file to the internal knowledge base.
@@ -190,6 +217,7 @@ async def upload_knowledge_document(
             filename=file.filename or "upload",
             content_type=file.content_type or "",
             file_bytes=file_bytes,
+            org_id=current_user.org_id,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
@@ -203,15 +231,22 @@ async def upload_knowledge_document(
 
 
 @app.get("/api/knowledge")
-async def list_knowledge_documents(db: Session = Depends(get_db)):
+async def list_knowledge_documents(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     """List all documents in the knowledge base with their metadata."""
-    return list_documents(db)
+    return list_documents(db, org_id=current_user.org_id)
 
 
 @app.get("/api/knowledge/{doc_id}")
-async def get_knowledge_document(doc_id: str, db: Session = Depends(get_db)):
+async def get_knowledge_document(
+    doc_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     """Get metadata for a specific knowledge document."""
-    doc = get_document(db, doc_id)
+    doc = get_document(db, doc_id, org_id=current_user.org_id)
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
     return doc
@@ -242,6 +277,7 @@ async def analyze_rfp(
     file: UploadFile = File(...),
     industry: Optional[str] = Form(None),
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     if not file.filename or not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are supported")
@@ -286,12 +322,16 @@ async def analyze_rfp(
     return await _run_analysis(
         text=text, filename=file.filename, industry=industry, db=db,
         rfp_id=rfp_id, file_path=file_path,
+        org_id=current_user.org_id,
     )
 
 
 @app.get("/api/rfps")
-async def list_rfps(db: Session = Depends(get_db)):
-    rfps = db.query(RFP).order_by(RFP.created_at.desc()).all()
+async def list_rfps(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    rfps = db.query(RFP).filter(RFP.org_id == current_user.org_id).order_by(RFP.created_at.desc()).all()
     return [
         {
             "id": r.id,
@@ -309,8 +349,12 @@ async def list_rfps(db: Session = Depends(get_db)):
 
 
 @app.get("/api/rfps/{rfp_id}")
-async def get_rfp(rfp_id: str, db: Session = Depends(get_db)):
-    rfp = db.query(RFP).filter(RFP.id == rfp_id).first()
+async def get_rfp(
+    rfp_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    rfp = db.query(RFP).filter(RFP.id == rfp_id, RFP.org_id == current_user.org_id).first()
     if not rfp:
         raise HTTPException(status_code=404, detail="RFP not found")
 
@@ -362,6 +406,7 @@ async def retry_rfp_analysis(
     rfp_id: str,
     body: RetryRequest = Body(default_factory=RetryRequest),
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """
     Resume a partial_failure analysis from a specific step without re-uploading
@@ -370,7 +415,7 @@ async def retry_rfp_analysis(
     - retry_from: which step to restart from. Defaults to the step that failed.
       Valid values: "requirement_extraction", "proposal_generation", "bid_scoring"
     """
-    rfp = db.query(RFP).filter(RFP.id == rfp_id).first()
+    rfp = db.query(RFP).filter(RFP.id == rfp_id, RFP.org_id == current_user.org_id).first()
     if not rfp:
         raise HTTPException(status_code=404, detail="RFP not found")
 
@@ -385,8 +430,12 @@ async def retry_rfp_analysis(
 
 
 @app.delete("/api/rfps/{rfp_id}")
-async def delete_rfp(rfp_id: str, db: Session = Depends(get_db)):
-    rfp = db.query(RFP).filter(RFP.id == rfp_id).first()
+async def delete_rfp(
+    rfp_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    rfp = db.query(RFP).filter(RFP.id == rfp_id, RFP.org_id == current_user.org_id).first()
     if not rfp:
         raise HTTPException(status_code=404, detail="RFP not found")
 
@@ -400,7 +449,11 @@ async def delete_rfp(rfp_id: str, db: Session = Depends(get_db)):
 
 
 @app.post("/api/analyze-url")
-async def analyze_url(body: AnalyzeURLRequest, db: Session = Depends(get_db)):
+async def analyze_url(
+    body: AnalyzeURLRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     url_str = str(body.url)
     try:
         text, source_name = await fetch_url_text(url_str)
@@ -409,7 +462,10 @@ async def analyze_url(body: AnalyzeURLRequest, db: Session = Depends(get_db)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch URL: {e}")
 
-    return await _run_analysis(text=text, filename=source_name, industry=body.industry, db=db)
+    return await _run_analysis(
+        text=text, filename=source_name, industry=body.industry, db=db,
+        org_id=current_user.org_id,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -435,6 +491,7 @@ async def sam_analyze(
     notice_id: str,
     body: SAMAnalyzeRequest = Body(default=SAMAnalyzeRequest()),
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     try:
         text, title = await get_opportunity_text(notice_id)
@@ -442,7 +499,8 @@ async def sam_analyze(
         raise HTTPException(status_code=400, detail=str(e))
 
     return await _run_analysis(
-        text=text, filename=f"SAM.gov — {title}", industry=body.industry, db=db
+        text=text, filename=f"SAM.gov — {title}", industry=body.industry, db=db,
+        org_id=current_user.org_id,
     )
 
 
@@ -461,6 +519,7 @@ async def _run_analysis(
     industry: Optional[str] = None,
     rfp_id: Optional[str] = None,
     file_path: Optional[Path] = None,
+    org_id: Optional[str] = None,
 ) -> dict:
     """
     Start a new analysis from scratch.
@@ -469,6 +528,7 @@ async def _run_analysis(
     file_path: if provided (PDF upload path), it is deleted on successful
     pipeline completion and preserved on partial_failure so retry can access
     the original file.  URL and SAM.gov analyses pass None.
+    org_id: scopes this record to the authenticated user's organisation.
     """
     if not text.strip():
         raise HTTPException(status_code=400, detail="No text content could be extracted.")
@@ -481,6 +541,7 @@ async def _run_analysis(
         filename=filename,
         original_text=text,           # full text — no truncation
         industry=resolved_industry,
+        org_id=org_id,
         pipeline_status="processing",
         completed_steps="[]",
         score=0,

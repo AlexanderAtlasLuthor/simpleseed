@@ -58,6 +58,7 @@ def init_db() -> None:
     from models.rfp import RFP                              # noqa: F401
     from models.feedback import Feedback                    # noqa: F401
     from models.knowledge_document import KnowledgeDocument # noqa: F401
+    from models.user import User                            # noqa: F401
     Base.metadata.create_all(bind=engine)
     _migrate()
 
@@ -108,10 +109,10 @@ def _migrate() -> None:
     For production-grade schema evolution use Alembic.
     """
     with engine.connect() as conn:
-        existing = _get_existing_columns(conn, "rfps")
+        existing_rfps = _get_existing_columns(conn, "rfps")
 
         # Map column_name → SQL column definition (type + default)
-        new_columns: dict[str, str] = {
+        rfp_columns: dict[str, str] = {
             "industry":         "TEXT DEFAULT 'general'",
             "risks":            "TEXT DEFAULT '[]'",
             "strategic_fit":    "TEXT DEFAULT '{}'",
@@ -121,10 +122,21 @@ def _migrate() -> None:
             "failed_step":      "TEXT",
             "completed_steps":  "TEXT DEFAULT '[]'",
             "pipeline_error":   "TEXT",
+            "org_id":           "TEXT",
         }
 
-        for col, definition in new_columns.items():
-            if col not in existing:
+        for col, definition in rfp_columns.items():
+            if col not in existing_rfps:
                 conn.execute(text(f"ALTER TABLE rfps ADD COLUMN {col} {definition}"))
+
+        # ── feedback table ────────────────────────────────────────────────────
+        existing_feedback = _get_existing_columns(conn, "feedback")
+        if "org_id" not in existing_feedback:
+            conn.execute(text("ALTER TABLE feedback ADD COLUMN org_id TEXT"))
+
+        # ── knowledge_documents table ─────────────────────────────────────────
+        existing_kb = _get_existing_columns(conn, "knowledge_documents")
+        if "org_id" not in existing_kb:
+            conn.execute(text("ALTER TABLE knowledge_documents ADD COLUMN org_id TEXT"))
 
         conn.commit()

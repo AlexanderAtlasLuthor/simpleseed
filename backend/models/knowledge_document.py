@@ -12,6 +12,7 @@ class KnowledgeDocument(Base):
     __tablename__ = "knowledge_documents"
 
     id                 = Column(String,  primary_key=True)    # "doc_" + uuid4 hex
+    org_id             = Column(String,  nullable=True, index=True)  # organisation scope
     filename           = Column(String,  nullable=False)
     content_type       = Column(String,  nullable=False)       # "application/pdf" | "text/plain"
     source             = Column(String,  default="internal_upload")
