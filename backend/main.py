@@ -705,7 +705,9 @@ async def _execute_pipeline_steps(
             if requirements.get("summary"):
                 kb_query_parts.append(requirements["summary"])
             kb_query = " ".join(kb_query_parts).strip()
-            knowledge_results = search_knowledge(kb_query) if kb_query else []
+            knowledge_results = (
+                search_knowledge(kb_query, org_id=rfp.org_id) if kb_query else []
+            )
 
             rfp.requirements   = json.dumps(requirements)
             rfp.risks          = json.dumps(risks)

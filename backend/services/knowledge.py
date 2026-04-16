@@ -3,11 +3,12 @@ Knowledge base service.
 
 Storage layout
 --------------
-Text content  : backend/knowledge/{document_id}.txt
-Metadata      : knowledge_documents table in SQLite
+Text content  : backend/knowledge/{org_id}/{document_id}.txt
+Metadata      : knowledge_documents table in SQLite/PostgreSQL
 
-This split lets search_knowledge() keep its simple file-scan approach
-while the API exposes rich metadata (filename, status, upload date, etc.).
+Each organisation's documents live in their own subdirectory, providing
+hard filesystem isolation between tenants.  The search function only
+scans the requesting org's directory — there is no cross-org fallback.
 
 Supported input types
 ---------------------
@@ -31,22 +32,62 @@ ALLOWED_EXTENSIONS = {".pdf", ".txt"}
 ALLOWED_MIME_PREFIXES = {"application/pdf", "text/plain", "text/"}
 
 
-# ── Search (unchanged behaviour, now also returns DB metadata when available) ─
+# ── Per-org directory helper ──────────────────────────────────────────────────
 
-def search_knowledge(query: str, top_k: int = 3) -> list[dict]:
-    """Return top_k documents most relevant to query by keyword overlap."""
-    KNOWLEDGE_DIR.mkdir(exist_ok=True)
+def _org_dir(org_id: str) -> Path:
+    """
+    Return (and create) the per-org subdirectory under KNOWLEDGE_DIR.
+
+    Layout: backend/knowledge/<org_id>/
+    Each org's documents are physically isolated in their own directory.
+    This is the single authoritative path — nothing reads outside of it.
+    """
+    d = KNOWLEDGE_DIR / org_id
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+# ── Search ────────────────────────────────────────────────────────────────────
+
+def search_knowledge(
+    query: str,
+    top_k: int = 3,
+    org_id: Optional[str] = None,
+) -> list[dict]:
+    """
+    Return up to top_k documents most relevant to query by keyword overlap.
+
+    IMPORTANT: when org_id is provided (the normal production path), only
+    that organisation's directory is searched.  When org_id is None, an
+    empty list is returned — there is deliberately no cross-org fallback.
+
+    This means an unauthenticated or mis-scoped call produces no results
+    rather than leaking another tenant's documents.
+    """
+    if not org_id:
+        # No org context → no results.  Never search across all orgs.
+        return []
+
+    search_dir = _org_dir(org_id)
+    if not any(search_dir.iterdir()) if search_dir.exists() else True:
+        # Directory empty or doesn't exist yet — return immediately
+        if not search_dir.exists() or not any(search_dir.glob("*.txt")):
+            return []
+
     query_words = set(query.lower().split())
     results = []
 
-    for doc_path in KNOWLEDGE_DIR.glob("*.txt"):
-        content = doc_path.read_text(encoding="utf-8", errors="ignore")
+    for doc_path in search_dir.glob("*.txt"):
+        try:
+            content = doc_path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
         overlap = len(query_words & set(content.lower().split()))
         if overlap > 0:
             results.append({
-                "document_id": doc_path.stem,
-                "filename": doc_path.name,
-                "snippet": content[:500],
+                "document_id":    doc_path.stem,
+                "filename":       doc_path.name,
+                "snippet":        content[:500],
                 "relevance_score": overlap,
             })
 
@@ -64,7 +105,11 @@ def upload_document(
     org_id: Optional[str] = None,
 ) -> KnowledgeDocument:
     """
-    Validate, extract text, persist file, and create a DB metadata record.
+    Validate, extract text, write to the org's directory, and create a
+    DB metadata record.
+
+    Text files are written to:
+        backend/knowledge/<org_id>/<doc_id>.txt
 
     Raises ValueError with a clear message for invalid input.
     Returns the completed KnowledgeDocument row.
@@ -72,24 +117,32 @@ def upload_document(
     _validate_upload(filename, content_type, len(file_bytes))
 
     doc_id = "doc_" + uuid.uuid4().hex
-    KNOWLEDGE_DIR.mkdir(exist_ok=True)
 
     # Create DB record in pending state first so it's visible even if extraction fails
     doc = KnowledgeDocument(
-        id               = doc_id,
-        filename         = filename,
-        content_type     = _normalise_content_type(filename, content_type),
-        source           = "internal_upload",
+        id                = doc_id,
+        filename          = filename,
+        content_type      = _normalise_content_type(filename, content_type),
+        source            = "internal_upload",
         processing_status = "pending",
-        org_id           = org_id,
+        org_id            = org_id,
     )
     db.add(doc)
     db.commit()
 
-    # Extract text
+    # Extract text and write to the org-scoped directory
     try:
         text = _extract_text(doc_id, filename, content_type, file_bytes)
-        text_path = KNOWLEDGE_DIR / f"{doc_id}.txt"
+
+        if org_id:
+            text_path = _org_dir(org_id) / f"{doc_id}.txt"
+        else:
+            # Fallback for unauthenticated uploads (should not occur in production
+            # since the endpoint requires auth, but prevents a crash during tests
+            # that bypass auth).
+            KNOWLEDGE_DIR.mkdir(exist_ok=True)
+            text_path = KNOWLEDGE_DIR / f"{doc_id}.txt"
+
         text_path.write_text(text, encoding="utf-8")
 
         doc.processing_status = "completed"
@@ -162,7 +215,7 @@ def _extract_text(
 
 def _extract_pdf(doc_id: str, file_bytes: bytes) -> str:
     """Write bytes to a temp file, run parse_pdf(), then clean up."""
-    import tempfile, os
+    import tempfile
     from services.parser import parse_pdf
 
     tmp_path = Path(tempfile.gettempdir()) / f"{doc_id}_upload.pdf"
