@@ -246,9 +246,14 @@ async def analyze_rfp(
     if not file.filename or not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are supported")
 
-    file_id = str(uuid.uuid4())
-    file_path = UPLOAD_DIR / f"{file_id}.pdf"
+    # Use rfp_id as the temp filename so retry and delete_rfp can locate the
+    # file by ID without storing an extra path in the database.
+    rfp_id = str(uuid.uuid4())
+    file_path = UPLOAD_DIR / f"{rfp_id}.pdf"
 
+    # ── Phase 1: ingest ──────────────────────────────────────────────────────
+    # Errors here mean no RFP record was created, so clean up the file
+    # immediately and return an HTTP error.  The pipeline has not started.
     try:
         received = 0
         with open(file_path, "wb") as f:
@@ -267,14 +272,21 @@ async def analyze_rfp(
         text = parse_pdf(str(file_path))
         if not text.strip():
             raise HTTPException(status_code=400, detail="Could not extract text from PDF.")
-        return await _run_analysis(text=text, filename=file.filename, industry=industry, db=db)
     except HTTPException:
+        file_path.unlink(missing_ok=True)
         raise
     except Exception as e:
+        file_path.unlink(missing_ok=True)
         raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        if file_path.exists():
-            file_path.unlink()
+
+    # ── Phase 2: pipeline ────────────────────────────────────────────────────
+    # Hand off to _run_analysis, which owns the file from this point.
+    # It will delete file_path on successful completion and preserve it on
+    # partial_failure so the retry endpoint has the original PDF available.
+    return await _run_analysis(
+        text=text, filename=file.filename, industry=industry, db=db,
+        rfp_id=rfp_id, file_path=file_path,
+    )
 
 
 @app.get("/api/rfps")
@@ -443,22 +455,31 @@ _PIPELINE_STEPS = ["requirement_extraction", "proposal_generation", "bid_scoring
 
 
 async def _run_analysis(
-    text: str, filename: str, db: Session, industry: Optional[str] = None
+    text: str,
+    filename: str,
+    db: Session,
+    industry: Optional[str] = None,
+    rfp_id: Optional[str] = None,
+    file_path: Optional[Path] = None,
 ) -> dict:
     """
     Start a new analysis from scratch.
     Creates the RFP record immediately, then delegates to _execute_pipeline_steps.
+
+    file_path: if provided (PDF upload path), it is deleted on successful
+    pipeline completion and preserved on partial_failure so retry can access
+    the original file.  URL and SAM.gov analyses pass None.
     """
     if not text.strip():
         raise HTTPException(status_code=400, detail="No text content could be extracted.")
 
     resolved_industry = resolve_industry(industry)
-    rfp_id = str(uuid.uuid4())
+    rfp_id = rfp_id or str(uuid.uuid4())
 
     rfp = RFP(
         id=rfp_id,
         filename=filename,
-        original_text=text[:12000],
+        original_text=text,           # full text — no truncation
         industry=resolved_industry,
         pipeline_status="processing",
         completed_steps="[]",
@@ -477,6 +498,10 @@ async def _run_analysis(
         db.commit()
         db.refresh(rfp)
     except Exception as e:
+        # No RFP record was persisted, so retry is impossible.
+        # Delete the temp file now — nothing to recover from.
+        if file_path:
+            file_path.unlink(missing_ok=True)
         raise HTTPException(status_code=500, detail=f"Database error on record creation: {e}")
 
     return await _execute_pipeline_steps(
@@ -484,7 +509,8 @@ async def _run_analysis(
         completed_steps=[],
         requirements={}, risks=[], knowledge_results=[],
         proposal_text="", grounding_report={},
-        full_text=text,     # use full document text for initial extraction
+        full_text=text,
+        file_path=file_path,
     )
 
 
@@ -555,11 +581,18 @@ async def _resume_analysis(rfp: RFP, retry_from: str, db: Session) -> dict:
     rfp.completed_steps = json.dumps(completed_steps)
     db.commit()
 
+    # Reconstruct the temp file path.  The file was preserved on partial_failure
+    # and is named {rfp.id}.pdf (same UUID as the DB record) so we can find it
+    # without storing the path explicitly.  _execute_pipeline_steps will delete
+    # it on success and leave it in place on another failure.
+    retry_file_path = UPLOAD_DIR / f"{rfp.id}.pdf"
+
     result = await _execute_pipeline_steps(
         rfp=rfp, db=db, start_idx=start_idx,
         completed_steps=completed_steps,
         requirements=requirements, risks=risks, knowledge_results=knowledge_results,
         proposal_text=proposal_text, grounding_report=grounding_report,
+        file_path=retry_file_path,
     )
 
     # Attach retry metadata to the response
@@ -580,11 +613,16 @@ async def _execute_pipeline_steps(
     proposal_text: str,
     grounding_report: dict,
     full_text: str | None = None,
+    file_path: Optional[Path] = None,
 ) -> dict:
     """
     Run pipeline steps from start_idx onwards.
     For start_idx > 0 the caller has pre-loaded artifacts from earlier steps.
     Each step commits its output immediately; failure returns a partial response.
+
+    file_path: when present, the file is deleted only after all steps succeed
+    (pipeline_status == "completed").  On any failure it is left on disk so
+    the retry endpoint can re-run the pipeline with the original source file.
     """
     resolved_industry = rfp.industry or "general"
     score_result: dict = {}
@@ -678,6 +716,12 @@ async def _execute_pipeline_steps(
             return _record_pipeline_failure(db, rfp, completed_steps, "bid_scoring", exc)
 
     # ── All executed steps completed ─────────────────────────────────────────
+    # Delete the temp file now that we have a fully committed, successful
+    # analysis.  This is the only point in the pipeline where deletion is safe:
+    # any earlier exit (via _record_pipeline_failure) preserves the file.
+    if file_path:
+        file_path.unlink(missing_ok=True)
+
     knowledge_used = [
         {"document_id": r["document_id"], "filename": r["filename"]}
         for r in knowledge_results
