@@ -5,7 +5,8 @@ Tests the integration between KB retrieval and generate_proposal().
 No LLM calls, no real Anthropic API.
 Uses a temp dir for the knowledge store.
 """
-import sys, tempfile, json
+import asyncio
+import sys, tempfile, uuid
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 sys.path.insert(0, ".")
@@ -15,7 +16,9 @@ import services.knowledge as kb_mod
 _tmp_kb = tempfile.mkdtemp()
 kb_mod.KNOWLEDGE_DIR = Path(_tmp_kb)
 
-# Seed the knowledge dir with a realistic document
+# Seed the knowledge dir with a realistic document — in an org subdirectory,
+# matching production storage layout: backend/knowledge/<org_id>/<doc_id>.txt
+_TEST_ORG_ID = str(uuid.uuid4())
 _DOC_ID = "doc_healthcarepast"
 _DOC_CONTENT = (
     "We successfully delivered a cloud-based patient data integration platform "
@@ -24,14 +27,18 @@ _DOC_CONTENT = (
     "real-time analytics dashboard. Healthcare IT modernization completed on time "
     "and under budget. Key technologies: AWS, Python, PostgreSQL, HL7 FHIR."
 )
-(Path(_tmp_kb) / f"{_DOC_ID}.txt").write_text(_DOC_CONTENT)
+_org_path = Path(_tmp_kb) / _TEST_ORG_ID
+_org_path.mkdir(parents=True, exist_ok=True)
+(_org_path / f"{_DOC_ID}.txt").write_text(_DOC_CONTENT)
 
 from services.knowledge import search_knowledge
 import services.generator as gen_mod
 
 
 # ── Case 1: query matching KB content → results returned ─────────────────────
-results = search_knowledge("healthcare cloud patient data integration")
+results = search_knowledge(
+    "healthcare cloud patient data integration", org_id=_TEST_ORG_ID
+)
 assert len(results) >= 1, f"Expected at least 1 result, got {len(results)}"
 top = results[0]
 assert top["document_id"] == _DOC_ID
@@ -45,13 +52,15 @@ print(f"Case 1 PASS: search_knowledge returns results with relevance_score={top[
 
 
 # ── Case 2: empty KB query → empty results (no crash) ────────────────────────
-no_results = search_knowledge("")
+no_results = search_knowledge("", org_id=_TEST_ORG_ID)
 assert no_results == [], f"Empty query should yield [], got {no_results}"
 print("Case 2 PASS: empty query returns []")
 
 
 # ── Case 3: query with no keyword overlap → empty results ────────────────────
-unrelated = search_knowledge("submarine navigation sonar military torpedo")
+unrelated = search_knowledge(
+    "submarine navigation sonar military torpedo", org_id=_TEST_ORG_ID
+)
 assert unrelated == [], f"Unrelated query should return [], got {unrelated}"
 print("Case 3 PASS: unrelated query returns empty results")
 
@@ -60,7 +69,7 @@ print("Case 3 PASS: unrelated query returns empty results")
 # Mock the Anthropic client so no real API call is made
 captured_prompt = {}
 
-def _fake_create(**kwargs):
+async def _fake_create(**kwargs):
     msg = MagicMock()
     msg.content = [MagicMock(text="MOCK PROPOSAL")]
     # Capture the prompt for inspection
@@ -82,11 +91,11 @@ with patch.object(gen_mod, "get_client") as mock_client:
     }
 
     # With knowledge context — generate_proposal now returns a dict
-    result_with_kb = gen_mod.generate_proposal(
+    result_with_kb = asyncio.run(gen_mod.generate_proposal(
         requirements,
         industry="healthcare",
         knowledge_context=results,
-    )
+    ))
 
     assert isinstance(result_with_kb, dict), "generate_proposal must return a dict"
     assert "proposal" in result_with_kb
@@ -105,11 +114,11 @@ with patch.object(gen_mod, "get_client") as mock_client:
 
     # Without knowledge context (empty list)
     captured_prompt.clear()
-    result_no_kb = gen_mod.generate_proposal(
+    result_no_kb = asyncio.run(gen_mod.generate_proposal(
         requirements,
         industry="healthcare",
         knowledge_context=[],
-    )
+    ))
     prompt_text_no_kb = captured_prompt["content"]
     assert "INTERNAL KNOWLEDGE BASE" not in prompt_text_no_kb, \
         "Prompt must NOT contain KB section when context is empty"
@@ -118,7 +127,7 @@ with patch.object(gen_mod, "get_client") as mock_client:
 
     # Without knowledge_context param at all (backward compat)
     captured_prompt.clear()
-    result_compat = gen_mod.generate_proposal(requirements, industry="healthcare")
+    result_compat = asyncio.run(gen_mod.generate_proposal(requirements, industry="healthcare"))
     prompt_compat = captured_prompt["content"]
     assert "INTERNAL KNOWLEDGE BASE" not in prompt_compat, \
         "Omitting knowledge_context must not break existing callers"
@@ -156,10 +165,25 @@ print(f"Case 9 PASS: result has all required fields: {sorted(top.keys())}")
 keywords = ["healthcare", "cloud", "patient", "integration"]
 summary = "Modernize hospital data systems."
 kb_query = " ".join(keywords) + " " + summary
-results_from_req = search_knowledge(kb_query)
+results_from_req = search_knowledge(kb_query, org_id=_TEST_ORG_ID)
 assert len(results_from_req) >= 1, "Query built from requirements must find the seeded document"
 print(f"Case 10 PASS: query from requirements.keywords+summary finds KB doc "
       f"(relevance_score={results_from_req[0]['relevance_score']})")
+
+
+# ── Case 11: org isolation — other orgs see nothing ──────────────────────────
+other_org = str(uuid.uuid4())
+other_org_results = search_knowledge(
+    "healthcare cloud patient data integration", org_id=other_org
+)
+assert other_org_results == [], \
+    f"Other org must not see this org's documents, got {other_org_results}"
+print("Case 11 PASS: other orgs cannot see this org's documents")
+
+
+# ── Case 12: missing org_id → empty list ─────────────────────────────────────
+assert search_knowledge("healthcare cloud", org_id=None) == []
+print("Case 12 PASS: search_knowledge with org_id=None returns []")
 
 
 print("\nAll cases passed.")

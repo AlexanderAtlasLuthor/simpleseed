@@ -8,7 +8,9 @@ Metadata      : knowledge_documents table in SQLite/PostgreSQL
 
 Each organisation's documents live in their own subdirectory, providing
 hard filesystem isolation between tenants.  The search function only
-scans the requesting org's directory — there is no cross-org fallback.
+scans the requesting org's directory — there is no cross-org fallback
+and no production code path that writes or reads files outside
+KNOWLEDGE_DIR/<org_id>/.
 
 Supported input types
 ---------------------
@@ -32,6 +34,22 @@ ALLOWED_EXTENSIONS = {".pdf", ".txt"}
 ALLOWED_MIME_PREFIXES = {"application/pdf", "text/plain", "text/"}
 
 
+# ── org_id validation ─────────────────────────────────────────────────────────
+
+def _validate_org_id(org_id: str) -> None:
+    """
+    Validate that org_id is a well-formed UUID.  This is the only thing that
+    stands between application code and arbitrary path composition — it must
+    reject anything that could traverse outside KNOWLEDGE_DIR.
+    """
+    if not isinstance(org_id, str) or not org_id:
+        raise ValueError("org_id must be a non-empty string.")
+    try:
+        uuid.UUID(org_id)
+    except (ValueError, AttributeError, TypeError):
+        raise ValueError(f"Invalid org_id format (expected UUID): {org_id!r}")
+
+
 # ── Per-org directory helper ──────────────────────────────────────────────────
 
 def _org_dir(org_id: str) -> Path:
@@ -39,15 +57,18 @@ def _org_dir(org_id: str) -> Path:
     Return (and create) the per-org subdirectory under KNOWLEDGE_DIR.
 
     Layout: backend/knowledge/<org_id>/
-    Each org's documents are physically isolated in their own directory.
-    This is the single authoritative path — nothing reads outside of it.
+
+    Used ONLY by writers (upload_document).  Readers must never call this —
+    they should use KNOWLEDGE_DIR / org_id directly so no directory is
+    created as a side effect of a read.
     """
+    _validate_org_id(org_id)
     d = KNOWLEDGE_DIR / org_id
     d.mkdir(parents=True, exist_ok=True)
     return d
 
 
-# ── Search ────────────────────────────────────────────────────────────────────
+# ── Search (read-only) ────────────────────────────────────────────────────────
 
 def search_knowledge(
     query: str,
@@ -57,25 +78,22 @@ def search_knowledge(
     """
     Return up to top_k documents most relevant to query by keyword overlap.
 
-    IMPORTANT: when org_id is provided (the normal production path), only
-    that organisation's directory is searched.  When org_id is None, an
-    empty list is returned — there is deliberately no cross-org fallback.
-
-    This means an unauthenticated or mis-scoped call produces no results
-    rather than leaking another tenant's documents.
+    Scope: only KNOWLEDGE_DIR/<org_id>/ is searched.  When org_id is None or
+    falsey, an empty list is returned — there is deliberately no cross-org
+    fallback.  This function is read-only: it never creates directories.
     """
     if not org_id:
-        # No org context → no results.  Never search across all orgs.
         return []
 
-    search_dir = _org_dir(org_id)
-    if not any(search_dir.iterdir()) if search_dir.exists() else True:
-        # Directory empty or doesn't exist yet — return immediately
-        if not search_dir.exists() or not any(search_dir.glob("*.txt")):
-            return []
+    # Build the path directly — do NOT call _org_dir() here because that
+    # would create an empty directory for every searching org as a side
+    # effect of a read.
+    search_dir = KNOWLEDGE_DIR / org_id
+    if not search_dir.exists():
+        return []
 
     query_words = set(query.lower().split())
-    results = []
+    results: list[dict] = []
 
     for doc_path in search_dir.glob("*.txt"):
         try:
@@ -85,9 +103,9 @@ def search_knowledge(
         overlap = len(query_words & set(content.lower().split()))
         if overlap > 0:
             results.append({
-                "document_id":    doc_path.stem,
-                "filename":       doc_path.name,
-                "snippet":        content[:500],
+                "document_id":     doc_path.stem,
+                "filename":        doc_path.name,
+                "snippet":         content[:500],
                 "relevance_score": overlap,
             })
 
@@ -108,12 +126,21 @@ def upload_document(
     Validate, extract text, write to the org's directory, and create a
     DB metadata record.
 
-    Text files are written to:
-        backend/knowledge/<org_id>/<doc_id>.txt
+    Text files are written to backend/knowledge/<org_id>/<doc_id>.txt.
 
-    Raises ValueError with a clear message for invalid input.
-    Returns the completed KnowledgeDocument row.
+    Raises:
+      ValueError — if org_id is missing, if org_id is malformed, or if the
+                   file fails validation (size, type, etc.)
+
+    There is no fallback path that writes without an org_id.  Every
+    knowledge document must belong to an organisation.
     """
+    if not org_id:
+        raise ValueError(
+            "org_id is required for knowledge document upload. "
+            "Every document must belong to an organisation."
+        )
+    _validate_org_id(org_id)
     _validate_upload(filename, content_type, len(file_bytes))
 
     doc_id = "doc_" + uuid.uuid4().hex
@@ -130,24 +157,17 @@ def upload_document(
     db.add(doc)
     db.commit()
 
-    # Extract text and write to the org-scoped directory
+    # Extract text and write to the org-scoped directory.  _org_dir creates
+    # the directory if it does not yet exist — this is the only place that
+    # is allowed to do so.
     try:
         text = _extract_text(doc_id, filename, content_type, file_bytes)
-
-        if org_id:
-            text_path = _org_dir(org_id) / f"{doc_id}.txt"
-        else:
-            # Fallback for unauthenticated uploads (should not occur in production
-            # since the endpoint requires auth, but prevents a crash during tests
-            # that bypass auth).
-            KNOWLEDGE_DIR.mkdir(exist_ok=True)
-            text_path = KNOWLEDGE_DIR / f"{doc_id}.txt"
-
+        text_path = _org_dir(org_id) / f"{doc_id}.txt"
         text_path.write_text(text, encoding="utf-8")
 
         doc.processing_status = "completed"
-        doc.text_length        = len(text)
-        doc.error_message      = None
+        doc.text_length       = len(text)
+        doc.error_message     = None
     except Exception as exc:
         doc.processing_status = "error"
         doc.error_message     = str(exc)[:500]

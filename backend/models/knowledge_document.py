@@ -6,8 +6,9 @@ from database import Base
 class KnowledgeDocument(Base):
     """
     Metadata record for a document uploaded to the internal knowledge base.
-    The extracted text is stored as {id}.txt in backend/knowledge/
-    so the existing search_knowledge() function can read it without changes.
+    The extracted text is stored as backend/knowledge/{org_id}/{id}.txt —
+    per-org subdirectories provide hard filesystem isolation between tenants.
+    search_knowledge() only scans the requesting org's directory.
     """
     __tablename__ = "knowledge_documents"
 

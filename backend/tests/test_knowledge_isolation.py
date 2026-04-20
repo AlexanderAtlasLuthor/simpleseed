@@ -27,6 +27,7 @@ os.environ.setdefault("SECRET_KEY", "test-secret-for-knowledge-isolation-tests!"
 from services.knowledge import (   # noqa: E402
     KNOWLEDGE_DIR,
     _org_dir,
+    _validate_org_id,
     search_knowledge,
     upload_document,
 )
@@ -297,3 +298,164 @@ def test_legacy_flat_files_not_returned_in_org_search(tmp_knowledge_root, monkey
     assert results == [], (
         "Legacy flat-root files must not surface in per-org searches after migration"
     )
+
+
+# ── 6. Regression tests for audit-reported runtime bugs ──────────────────────
+
+class _MockDB:
+    def add(self, obj): pass
+    def commit(self): pass
+    def refresh(self, obj): pass
+
+
+def test_upload_without_org_id_raises(tmp_knowledge_root, monkeypatch):
+    """
+    upload_document() with a missing org_id MUST raise ValueError and MUST NOT
+    write anything to disk.  Previously this silently fell through to the
+    flat root, leaking documents outside any tenant's scope.
+    """
+    monkeypatch.setattr("services.knowledge.KNOWLEDGE_DIR", tmp_knowledge_root)
+
+    with pytest.raises(ValueError, match="org_id is required"):
+        upload_document(
+            db=_MockDB(),
+            filename="leak.txt",
+            content_type="text/plain",
+            file_bytes=b"sensitive data that must never land in the global root",
+            org_id=None,
+        )
+
+    # No file must have been created anywhere under KNOWLEDGE_DIR
+    leaked = list(tmp_knowledge_root.rglob("*.txt"))
+    assert leaked == [], f"Files leaked despite missing org_id: {leaked}"
+
+
+def test_upload_with_empty_org_id_raises(tmp_knowledge_root, monkeypatch):
+    """Empty-string org_id is equally invalid and must not write anything."""
+    monkeypatch.setattr("services.knowledge.KNOWLEDGE_DIR", tmp_knowledge_root)
+
+    with pytest.raises(ValueError):
+        upload_document(
+            db=_MockDB(),
+            filename="leak.txt",
+            content_type="text/plain",
+            file_bytes=b"x",
+            org_id="",
+        )
+
+    assert list(tmp_knowledge_root.rglob("*.txt")) == []
+
+
+def test_search_does_not_create_directory(tmp_knowledge_root, monkeypatch):
+    """
+    search_knowledge() is read-only.  Calling it for an org that has never
+    uploaded anything must NOT leave a directory behind on disk.  The old
+    code called _org_dir() in the read path, which did `mkdir(exist_ok=True)`.
+    """
+    monkeypatch.setattr("services.knowledge.KNOWLEDGE_DIR", tmp_knowledge_root)
+
+    fresh_org = str(uuid.uuid4())
+    assert not (tmp_knowledge_root / fresh_org).exists()
+
+    results = search_knowledge("anything", org_id=fresh_org)
+
+    assert results == []
+    assert not (tmp_knowledge_root / fresh_org).exists(), (
+        "search_knowledge must not create directories as a side effect of a read"
+    )
+
+
+def test_search_with_no_org_id_creates_no_directory(tmp_knowledge_root, monkeypatch):
+    """Bare search with org_id=None must not touch the filesystem at all."""
+    monkeypatch.setattr("services.knowledge.KNOWLEDGE_DIR", tmp_knowledge_root)
+
+    before = set(tmp_knowledge_root.iterdir())
+    search_knowledge("cloud", org_id=None)
+    after = set(tmp_knowledge_root.iterdir())
+    assert before == after
+
+
+def test_invalid_org_id_rejected_by_validator():
+    """
+    _validate_org_id must reject anything that isn't a UUID.  This is the
+    structural defense against path traversal via org_id.
+    """
+    bad_values = [
+        "../etc/passwd",
+        "..",
+        "/",
+        "some/subdir",
+        "not-a-uuid",
+        "",
+        None,
+        12345,
+        ["uuid"],
+    ]
+    for bad in bad_values:
+        with pytest.raises(ValueError):
+            _validate_org_id(bad)
+
+
+def test_org_dir_rejects_path_traversal(tmp_knowledge_root, monkeypatch):
+    """_org_dir must refuse non-UUID inputs before touching the filesystem."""
+    monkeypatch.setattr("services.knowledge.KNOWLEDGE_DIR", tmp_knowledge_root)
+
+    with pytest.raises(ValueError):
+        _org_dir("../escape")
+
+    # Nothing must have been created
+    assert list(tmp_knowledge_root.iterdir()) == []
+
+
+def test_upload_rejects_malformed_org_id(tmp_knowledge_root, monkeypatch):
+    """upload_document must reject non-UUID org_ids without writing anything."""
+    monkeypatch.setattr("services.knowledge.KNOWLEDGE_DIR", tmp_knowledge_root)
+
+    with pytest.raises(ValueError, match="Invalid org_id"):
+        upload_document(
+            db=_MockDB(),
+            filename="x.txt",
+            content_type="text/plain",
+            file_bytes=b"content",
+            org_id="../escape",
+        )
+    assert list(tmp_knowledge_root.rglob("*.txt")) == []
+
+
+def test_pdf_upload_lands_in_org_dir(tmp_knowledge_root, monkeypatch):
+    """
+    PDF uploads must extract text and write to the org's subdirectory, same
+    as .txt uploads.  We inject a stub services.parser so the real module
+    (which pulls in pdfplumber / cryptography) never loads.
+    """
+    monkeypatch.setattr("services.knowledge.KNOWLEDGE_DIR", tmp_knowledge_root)
+
+    # Stub services.parser in sys.modules — _extract_pdf does a lazy
+    # `from services.parser import parse_pdf` so this intercept is sufficient.
+    import sys, types
+    fake_parser = types.ModuleType("services.parser")
+    fake_parser.parse_pdf = lambda path: "extracted pdf body text for testing"
+    monkeypatch.setitem(sys.modules, "services.parser", fake_parser)
+
+    org_id = str(uuid.uuid4())
+    doc = upload_document(
+        db=_MockDB(),
+        filename="past_performance.pdf",
+        content_type="application/pdf",
+        # Minimal bytes that satisfy size check (> 0)
+        file_bytes=b"%PDF-1.4 fake pdf payload",
+        org_id=org_id,
+    )
+
+    expected = tmp_knowledge_root / org_id / f"{doc.id}.txt"
+    assert expected.exists(), f"PDF extraction output missing at {expected}"
+    assert expected.read_text(encoding="utf-8") == "extracted pdf body text for testing"
+
+    # Must not have leaked to flat root
+    assert list(tmp_knowledge_root.glob("*.txt")) == []
+
+
+def test_validate_org_id_accepts_valid_uuid():
+    """Sanity: real UUIDs pass validation."""
+    _validate_org_id(str(uuid.uuid4()))  # must not raise
+    _validate_org_id(str(uuid.UUID("12345678-1234-5678-1234-567812345678")))
